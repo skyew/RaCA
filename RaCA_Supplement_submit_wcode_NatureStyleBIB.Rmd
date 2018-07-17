@@ -1,0 +1,2497 @@
+---
+title: 'Supplement for RaCA: SOC in CONUS, a reporoducible baseline'
+author: "Wills and Loecke"
+date: "March 5 2018"
+output:
+  pdf_document: default
+    #toc: true
+header-includes: 
+ - \renewcommand{\caption}{Fig.}
+ - \usepackage{caption}
+bibliography: RaCAbib2.bib
+csl: nature.csl
+---
+
+\captionsetup[table]{labelformat=empty}
+
+# RaCA study design and data analysis
+##Introduction
+This document is a supplement to the **Rapid Carbon Assessment: A baseline soil organic carbon pool for CONUS with refinements in confidence and understanding**. This document was produced with knitR as an R markdown file. It is exported as an html and pdf document. A breif description of each phase of data analysis is given followed by the R script used to execute. Some portions (data and devTools download) are best done once outside the rmd file. Update rmd file with desired path to execute.
+
+```{r setup, include=TRUE, echo=T, message=F}
+require("knitr")
+
+knitr::opts_chunk$set(echo = T, comment = "#", warning = FALSE, 
+                      message = FALSE, error =FALSE, eval=T,
+                      tidy.opts=list(width.cutoff=60),tidy=TRUE)
+
+#To use this script, update with paths
+#Set working directory to the desired location to download RaCA data
+
+workdir <- setwd(getwd()) # personalize the working directory for each user.
+opts_knit$set(root.dir = workdir)
+
+rm(list=ls()) #clear previous data
+
+list.of.packages <- c("ggplot2", "plyr", "Rcpp", "RColorBrewer", 
+                      "lattice", "aqp", "stringr", "reshape2", "ggthemes",
+                      "tidyverse", "RCurl", "Hmisc", "gridExtra", "ggmosaic",
+                      "png","rstan","lme4", "printr", "dplyr","tidyr", 
+                      "StanHeaders")
+
+new.packages <- list.of.packages[!(list.of.packages %in% 
+                                     installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+
+library(ggplot2)
+library(Rcpp)
+library(plyr)
+library(RColorBrewer)
+library(lattice)
+library(stringr)
+library(reshape2)
+library(ggthemes)
+library(RCurl)
+library(rstan)
+library(lme4)
+library(printr)
+```
+
+###Experimental design
+A full description of the design, protocols and methodology can be found at the Rapid Carbon Assessment website [@soilsurveystaffrapid2017]. Briefly, a multi-level stratified random sampling scheme was used to allocate soil pedons across the conterminous United States (CONUS) to capture the range, central tendency and variability across all soil types and land use - land cover classes. All areas of CONUS with National Cooperative Soil Survey maps, documented in the Soil Survey Geographic Database (known as SSURGO) as of January 2012 [@gSSURGO2013] were part of the sampling domain. Strata were created by regions (defined by the 2010 Major Land Resource Area Regional Office Areas, in the National Soil Survey Handbook [@us_department_of_agriculture_natural_resources_conservation_service_national_nodate], groups of soils with similar expected SOC (as described by Wills et al.[@Wills2013]), and land use - land cover classes as defined by the National Resource Inventory (NRI; [@UnitedStatesDepartmentofAgriculture2007]) which were represented spatially by linked classes in the National Land Cover Dataset (NLCD[@Fry2011]). The combination of land use - land cover class and soil group is referred to as LUGR and was used to distribute and aggregate pedon data. The NRI sampling framework [@Nusser1998] was used to distribute sites or locations for sampling within each LUGR strata.
+
+### RaCA data source
+Data analysis begins with the basic sample data available via USDA/NRCS box accounts or through the RaCA website.
+This section may be used to directly download data (set the working directory to your desired location in the setup portion of the rmd file).  Otherwise, the data, basic summary and metadata can be accessed at the [RaCA website](https://www.nrcs.usda.gov/wps/portal/nrcs/detail/soils/survey/?cid=nrcs142p2_054164).
+
+```{r data, eval=T,  echo = T, warning = F, message = F, include=F, results='hide', cache=T}
+
+
+raca.samp.url <- 'https://nrcs.box.com/shared/static/1huwn8z1ulpyylnfgj920twpua0rfjp3.csv'
+if(!file.exists('RaCA_samples.csv'))
+  download.file(raca.samp.url, destfile = 'RaCA_samples.csv') 
+samp <- read.csv("RaCA_samples.csv", na.strings = c("NA", "NULL"))
+
+#pixel counts from 30m grid of gSSURGO and NLCD used to calculate weights
+
+raca.lugr.wt.url <- 'https://nrcs.box.com/shared/static/c5zerrrhum9uyvxdx93nq6p1mqx8cqg7.csv'
+if(!file.exists('LUGR_pixelcount30m_label.csv'))
+  download.file(raca.lugr.wt.url,
+                destfile = 'LUGR_pixelcount30m_label.csv')
+LUGR_wt <- read.csv("LUGR_pixelcount30m_label.csv")
+
+#region area from NRCS MO polygon (2008)
+raca.region.url <- 'https://nrcs.box.com/shared/static/k568mkg4ge11rncqvfpcl9bgl85ohgi6.csv'
+if(!file.exists('raca_region.csv '))
+  download.file(raca.region.url ,
+                destfile = 'RaCA_region.csv') 
+region <- read.csv("RaCA_region.csv")
+
+# previous estimates of CONUS SOC from the literature
+conus_SOC_previous_url <- 'https://nrcs.box.com/shared/static/9a3vquaf8o3jiq9k5tfqixbd4p1e91xe.xlsx'
+ifelse(!file.exists('CONUS_SOC_previous_estimates.xlsx'),
+       download.file(conus_SOC_previous_url,
+                     destfile = 'CONUS_SOC_previous_estimates.xlsx') ,
+       "File already downloaded")
+
+```
+
+###Field sampling protocols
+A randomized list of target sites was supplied to NRCS soil scientists as x-y coordinates.  Land use -land cover class and soil group were verified remotely and again upon sample collection. All site, pedon, data and sample collection were done with a common set of protocols [@soilsurveystaffrapid2017]. All protocols (including instructions for moving dangerous or inaccessible sites) and data collected are available at the RaCA website [@soilsurveystaffrapid2017]. Additional information on general vegetation, bare ground and satellite pedons (four pedons 30m away in each cardinal direction, sampled but not analyzed in the laboratory) is available, but was not used for this project/manuscript.  As near as possible to the x,y coordinates, small pits were excavated to a depth of 50 centimeters or to a root-limiting layer, such as bedrock or cemented soil. Each pedon was described according to the "Field Book for Describing and Sampling Soils" [@schoeneberger2012]. Minimum required information for each horizon included: horizon designation, depths, color, texture, rock fragment modifier (percent coarse fragments by volume), redoximorphic features, and structure (where possible). Samples were collected from the surface to a depth of 5 centimeters and from 5 to 50 centimeters by genetic horizon. Probes or augers were used to sample genetic horizons from 50 to 100 centimeters. Volumetric samples were collected for samples from the surface to a depth of 50 centimeters in the most appropriate manner [@soilsurveystaffrapid2017]. Samples were labeled, sealed in air-tight bags, and transported to the soil survey regional office for processing.
+
+###Sample analyses
+All samples were transported to regional soil survey offices and processed to <2mm and air dried. Samples from the central pedon were shipped to the Kellogg Soil Survey Laboratory where combustion soil organic carbon and calcimeter inorganic carbon were done according to the Soil Survey Laboratory Methods Manual [@KelloggSoilMethods2014].
+
+For each sample, SOC was defined as the difference between total carbon and inorganic carbon (See RaCA Data Preparation, this document). Bulk density was calculated using the total air dry weight of each sample, corrected for the weight of coarse fragments greater than 2mm and for any remaining water weight and the known sample volume. For samples without known volume, bulk density was modelled using the random forest approach described by Sequeira et al. [-@Sequeira2014]. The models used and predictions generated are available at the RaCA website. The amount of soil material within in each given layer or horizon was corrected using a volumetric determination of coarse fragments during pedon description [@schoeneberger2012].
+
+### RaCA Data Preparation
+A set of rules was developed to clean and organize data. This included rules for inclusion (values that are theoretically possible), matching field and laboratory data records and checking that locations were within scope of the sampling scheme.  At this point, SOC concentration, bulk density and SOC density by sample were calculated. All data manipulation and calculations were done in R [@RCoreTeam2017]. Some variables are renamed for ease of script writing and reading. Explanation of data columns is available here, from the [RaCA website](https://www.cloudvault.usda.gov/index.php/s/yvAPDc3wBZTdwU2).
+
+```{r dataprep, warning = F, message = F, error = F }
+
+#limit calculations to central pedons that have laboratory data
+samp <- samp[samp$pedon_no == 1,]
+
+#count sites by land use and region
+#MO is an abbreviation for RaCA Region 
+# and LU is the abbreviation for Land Use/Land Cover class
+agg.sites <- aggregate(data=samp, rcasiteid ~ MO + LU , function(x) length(unique(x)))
+  names(agg.sites)[3]<- "Count"
+Count.sites <- reshape(agg.sites,idvar="MO", timevar = "LU", direction = "wide" )
+colnames(Count.sites) <- c("MO","Cropland","Forestland","Pastureland",
+                           "Rangeland","Wetland","CRP")
+knitr::kable(Count.sites, caption = "Table S1. Count of Sites by LU/LC and Region") 
+
+
+#simplify variables and calculate SOC density for each sample
+
+samp$CALC_SOC <- ifelse(!is.na(samp$caco3),
+ifelse(samp$caco3>0,samp$c_tot_ncs-(samp$caco3*0.12),samp$c_tot_ncs),
+samp$c_tot_ncs) 
+samp$SOC <- ifelse(samp$CALC_SOC<0, 0, samp$CALC_SOC)
+samp$BD <- ifelse(is.na(samp$Measure_BD), samp$Model_BD,
+                  #use modeled value if there is no measured BD 
+                   ifelse(samp$M == "O", ifelse(samp$Measure_BD>1,
+samp$Model_BD, samp$Measure_BD),
+#use modeled value for impossibly high BD in organic horizons
+                          ifelse(samp$Measure_BD>2, samp$Model_BD,
+                                 samp$Measure_BD))) 
+#if organic is high use model BD
+samp$SOCd <- with(samp,SOC*BD)
+samp$SOCden <- with(samp,SOC*BD*(1 - ifelse(fragvolc == 0, 0, fragvolc/100)))
+
+samp$top <-samp$TOP
+samp$bottom <- samp$BOT
+
+samp$thick <- samp$bottom - samp$top
+
+rm(agg.sites)
+
+```
+
+### RaCA Pedon - SOC stock calculation
+The next step used cleaned sample data to calculate fixed depth increment SOC stocks by pedon. This includes assigning some metadata to screen pedons for appropriate completeness. Pedons that are missing samples are not included in further analysis, excluding pedons that do not have samples from R, Cr, Bm or other root restricting layers.  Data aggregation done with the plyr package [@Wickham2011].
+Some variables are renamed for ease of script writing and reading.
+
+```{r pedon}
+
+#assign how layers are counted in stock calculations
+#puts a number on the amount (cm) of each layer used in calculation
+#there are more streamlined ways to do this but this method is maintained from
+# previous work (it is also computationally simple and uses few computing resources)
+library(plyr)
+
+samp$SOC_5 <- ifelse(samp$bottom<=5, samp$thick,ifelse(samp$top<5, 5-samp$top,0))
+
+samp$SOC_30 <- ifelse(samp$bottom<=30, samp$thick,
+                    ifelse(samp$top<30, 30-samp$top,0))
+
+samp$SOC_100 <- ifelse(samp$bottom<=100, samp$thick,
+                    ifelse(samp$top<100, 100-samp$top,0))
+
+#calculate layer stocks - assigned depth * SOCden 
+#native units are Mg/ha
+samp$SOCstock5 <- with(samp, SOCden*SOC_5)
+samp$SOCstock30 <- with(samp, SOCden*SOC_30)
+samp$SOCstock100 <- with(samp, SOCden*SOC_100)
+
+#sum SOC by pedon
+SOC_5 <- aggregate(SOCstock5~MO + MOGr + LU + MOGrLU + rcasiteid
+                   + upedonid + upedon, data=samp, FUN=sum)
+SOC_30 <- aggregate(SOCstock30~upedonid, data=samp, FUN=sum)
+SOC_100 <-aggregate(SOCstock100~upedonid, data=samp, FUN=sum) 
+
+
+#additional information about pedons used to screen for pedons
+# that do not meet depth requirements
+#pedon id info
+ped <- aggregate(sample.id ~MO + MOGr + LU + MOGrLU + rcasiteid
+                 + upedonid + upedon, data=samp, FUN=length)
+names(ped)[8] <- "Sample_count"
+
+#pedon information
+pedon_thick <- aggregate(thick  ~ upedonid, data=samp, FUN=sum)
+names(pedon_thick)[2] <- "total_thickness"
+ped_bott <- aggregate(bottom~upedonid, data=samp, FUN=max)
+lab_no <- aggregate(natural_key~upedonid, data=samp, FUN=length)
+names(lab_no)[2] <- "Lab_count"
+
+sample_notR <- aggregate(sample.id~upedonid, 
+                         data=samp[grep("R", 
+                                        samp$model_desg, 
+                                        invert=T, ignore.case=T),] , FUN=length)
+names(sample_notR)[2] <- "Non-R_SampleCount"
+
+SOC_no <- aggregate(SOC~upedonid, 
+                    data=samp[!is.na(samp$SOC), ], FUN=length)
+names(SOC_no)[2] <- "SOC_count"
+
+SOC_thick <- aggregate(thick~upedonid,
+                       data=samp[!is.na(samp$SOC), ], FUN=sum)
+names(SOC_thick)[2] <- "SOC_thickness"
+
+top <- aggregate(top~upedonid, data=samp, FUN=min)
+names(top)[2] <- "Pedon_top"
+
+#depth of R or other restrictive layer 
+# (assumed to have negligble SOC at this depth and below)
+
+hard <- c("Bkm", "Bkmm", "Bqm", "R", "Cr", "m")
+depthR <- aggregate(top~upedonid,
+                    data=samp[grepl(paste(hard, collapse='|'),
+                                    samp$model_desg, ignore.case=T),],FUN=min)
+names(depthR)[2] <- "Depth_to_R"
+
+depth_O <- aggregate(thick~upedonid,
+                     data=samp[samp$M == "O",], FUN=min)
+names(depth_O)[2] <- "Depth_of_O"
+depth_O$Depth_of_O <- ifelse(is.na(depth_O$Depth_of_O), 0, depth_O$Depth_of_O)
+
+#combine pedon information
+
+SOC5 <- join(ped, SOC_5, by="upedonid", type="full", match="first")
+SOC30 <- join(SOC5, SOC_30, by="upedonid", type="full", match="first")
+SOC100 <- join(SOC30,SOC_100, by="upedonid", type="full", match="first")
+SOCp <- join(SOC100, pedon_thick, by="upedonid", type="full", match="first")
+SOCn <- join(SOCp, SOC_no, by="upedonid", type="full", match="first")
+SOCnn <- join(SOCn, lab_no, by="upedonid", type="full", match="first")
+SOCpn <- join(SOCnn, depthR, by="upedonid", type="full", match="first")
+SOCpp <- join(SOCpn, sample_notR, by="upedonid", type="full", match="first")
+SOCpo <- join(SOCpp, depth_O, by="upedonid", type="full", match="first")
+SOCpedons <- join(SOCpo, SOC_thick, by="upedonid", type="full", match="first")
+
+#remove unneeded tables
+rm(SOC5,SOC30, SOC100, SOCp, SOCn, SOCnn, SOCpp, SOCpo)
+
+                                                      
+SOCpedons$USE <-ifelse(SOCpedons$SOCstock5 == 0,
+    ifelse(SOCpedons$SOC_count<SOCpedons$Lab_count,
+      "MISS_anal", "MISS_labsamp"), 
+        ifelse(is.na(SOCpedons$total_thickness),'NA',
+         ifelse(SOCpedons$SOC_thickness>=SOCpedons$total_thickness, '100',
+          ifelse(!is.na(SOCpedons$Depth_to_R),
+                 ifelse(SOCpedons$Depth_to_R <=SOCpedons$SOC_thickness , '100',
+                        ifelse(SOCpedons$SOC_thickness >= 100, '100',
+                               ifelse(SOCpedons$SOC_thickness >= 30, '30',
+                                      ifelse(SOCpedons$SOC_thickness >= 5, '5',
+                                             'NA')))),
+               ifelse(SOCpedons$SOC_thickness >= 100, '100',
+                ifelse(SOCpedons$SOC_thickness >= 30, '30',
+                 ifelse(SOCpedons$SOC_thickness >= 5, '5', 'NA')))))))
+
+# check NAs and missing samples
+kable(table(SOCpedons$MO,SOCpedons$USE, useNA= "ifany"), 
+       caption = "Table S2. Counts of missing samples by depth")
+Use.pedons <- ddply(SOCpedons, .(MO), summarise, 
+                          N_5= sum(!is.na(SOCstock5)),
+                          N_30= sum(!is.na(SOCstock30)),
+                          N_100= sum(!is.na(SOCstock100))
+)
+
+  
+#keep ones with values
+SOCpedons <- SOCpedons[!is.na(SOCpedons$SOCstock5),]
+SOCpedons <- SOCpedons[SOCpedons$SOCstock5 != 0,]
+
+#remove stocks based on Use field 
+SOCpedons$SOCstock5 <- as.numeric(ifelse(SOCpedons$USE %in%
+                                           c(5, 30, 100),
+                                         SOCpedons$SOCstock5, ""))
+SOCpedons$SOCstock30 <- as.numeric(ifelse(SOCpedons$USE
+                                          %in% c(30, 100),
+                                          SOCpedons$SOCstock30, ""))
+SOCpedons$SOCstock100 <- as.numeric(ifelse(SOCpedons$USE
+                                           %in% c(100),
+                                           SOCpedons$SOCstock100, ""))
+
+#limit pedon file to those that have useable data
+SOCpedons <- SOCpedons[!is.na(SOCpedons$USE),]
+
+#remove unwanted objects
+rm(hard, depth_O, depthR, lab_no,ped, ped_bott, pedon_thick, 
+   sample_notR, SOC_thick, SOC_100, SOC_30, SOC_5, SOC_no, SOCpn, top )
+
+#export pedon (site) level SOC stocks
+#############
+write.table(SOCpedons,"RaCA_SOC_pedons.csv", sep=",", row.names=F)
+
+```
+
+## Data visualization
+
+Graphs were produced with various packages within the statistical program R [@RCoreTeam2017] and implemented using R studio [@RStudioTeam2016].  The Algorithm for Quantitative Pedology (aqp, [@Beaudette2013] was used to evaluate properties by depth.  Graphs, boxplots, stacked bar charts and density plots were created with ggplot2 [@Wickham2009] supplemented by gridExtra  [@Auguie2017] and ggmosaic [@Jeppson2017].  
+
+Maps were created using ArcGIS __(ESRI Inc.)__ for compatibility with soil survey projects and servers.
+
+###Sample properties by depth
+
+The aqp package [@Beaudette2013] manipulates soil data by arranging pedons into common depth increments and aiding in visualization.  The package was used to aggregate sample values by land use - land cover class and display the results by depth in the main text.
+
+```{r depthplotPrep, eval=T}
+
+require(aqp)
+
+#filter samples to those that have land use/cover class with spatial extent
+# written as LU does not equal X
+
+x <- samp[samp$LU != "X",]
+
+#use aqp package to treat groups of samples as pedons with locations and depths
+# promote to soil profile 
+
+depths(x) <- upedon  ~ TOP + BOT
+
+# move some site-level data to site slot
+site(x) <- ~ rcasiteid + MO + LU
+
+# slice horizon samples into individual 1cm depth slices for calculation
+# depth-wise quantiles, by LU
+#because all pedons had a 0 -5cm sample collected and other depths were
+# allowed to fluctuate, this creates some artifacts
+
+a <- slab(x, LU ~ SOC + BD + SOCden)
+
+# assign labels to LU factor levels
+
+
+a$LU <- factor(a$LU, levels=c('C', 'F', 'P', 'R', 'W'),
+               labels=c('Cropland', 'Forestland', 'Pastureland',
+                        'Rangeland', 'Wetland'))
+
+# custom colors
+tps <- list(superpose.line=list(col=c('Yellow',
+                                      'DarkGreen', "LightGreen",'DarkRed',
+                                      "RoyalBlue"), lwd=3))
+
+p.SOC <- xyplot(top ~ p.q50, groups=LU, data=a, 
+                ylab=list('Depth (cm)', cex= 1),
+                xlab=list('% SOC 
+                          \n Median (line) bounded by 25th and 75th percentiles (shaded)',
+                          cex = .75),
+                lower=a$p.q25, upper=a$p.q75, ylim=c(100,-1),
+                panel=panel.depth_function, alpha=0.25, sync.colors=TRUE,
+                prepanel=prepanel.depth_function,
+                strip=strip.custom(bg=grey(0.85)),
+                scales=list(x=list(alternating=1)),
+                par.settings=tps, subset=variable == 'SOC',
+                auto.key=list(columns=3,  
+                              space = "top", just = .005,
+                              lines=TRUE, points=FALSE, cex=.6),
+                xlim=c(0,40))
+
+
+p.SOC.z <- xyplot(top ~ p.q50, groups=LU, data=a,
+                  ylab='Depth (cm)',
+xlab=list('% SOC \n Median (line) bounded by 25th and 75th percentiles (shaded)',
+          cex = 0.75),
+                lower=a$p.q25, upper=a$p.q75, ylim=c(50,-1),
+                panel=panel.depth_function, alpha=0.25, sync.colors=TRUE,
+                prepanel=prepanel.depth_function,
+                strip=strip.custom(bg=grey(0.85)),
+                 scales=list(x=list(alternating=1)),
+                par.settings=tps, subset=variable == 'SOC',
+                auto.key=list(title ="Land Use - Land Cover Classes", 
+                              columns=3,
+                              space = "top", just = 0.005,  lines=TRUE,
+                              points=FALSE, cex=.6),xlim=c(0,7.5)
+)
+
+p.BD <- xyplot(top ~ p.q50, groups=LU, data=a, ylab='Depth (cm)',
+              xlab=list('Bulk density (g cm-3)
+                \n Median (line) bounded by 25th and 75th percentiles (shaded)',
+                cex = .75), 
+               lower=a$p.q25, 
+               upper=a$p.q75, 
+               ylim=c(100,-1),
+               panel=panel.depth_function, 
+               alpha=0.25, 
+               sync.colors=TRUE,
+               prepanel=prepanel.depth_function,
+               strip=strip.custom(bg=grey(0.85)),
+               scales=list(x=list(alternating=1)),
+               par.settings=tps, subset=variable == 'BD',
+                auto.key=list(columns=3,  
+                              space = "top", just = 0.005,  lines=TRUE,
+                              points=FALSE, cex=.6)
+)
+
+p.BD <- xyplot(top ~ p.q50, groups=LU, data=a, ylab='Depth (cm)',
+              xlab=list(expression(paste('Bulk density (g cm'^-3,')'),
+                        '\n Median (line) bounded by 25th and 75th percentiles (shaded)'), cex = .75), 
+               lower=a$p.q25, 
+               upper=a$p.q75, 
+               ylim=c(100,-1),
+               panel=panel.depth_function, 
+               alpha=0.25, 
+               sync.colors=TRUE,
+               prepanel=prepanel.depth_function,
+               strip=strip.custom(bg=grey(0.85)),
+               scales=list(x=list(alternating=1)),
+               par.settings=tps, subset=variable == 'BD',
+                auto.key=list(columns=3,  
+                              space = "top", just = 0.005,  lines=TRUE, points=FALSE, cex=.6)
+               
+)
+
+p.SOCden <- xyplot(top ~ p.q50, groups=LU, data=a, ylab='Depth (cm)',
+              xlab=list('SOC density (g cm-3)
+                \n Median (line) bounded by 25th and 75th percentiles (shaded)',
+              cex = .75), 
+               lower=a$p.q25, 
+               upper=a$p.q75, 
+               ylim=c(50,-1),
+               panel=panel.depth_function, 
+               alpha=0.25, 
+               sync.colors=TRUE,
+               prepanel=prepanel.depth_function,
+               strip=strip.custom(bg=grey(0.85)),
+               scales=list(x=list(alternating=1)),
+               par.settings=tps, subset=variable == 'SOCden',
+                auto.key=list(title ="Land Use / Land Cover Classes", columns=3,
+                              space = "top", just = 0.005,
+                              lines=TRUE, points=FALSE, cex=.6)
+)
+```
+
+
+
+#### Fig S1. Plots of a) SOC concentrations, b) SOC concentrations on an alternate scale, c) bulk density and d) SOC density by depth. 
+```{r depthplot, eval=T}
+#display graphs
+p.SOC
+p.SOC.z
+p.BD
+p.SOCden
+
+#remove data from this chunk
+rm(x,a, tps) 
+
+#remove package that may interfere with other commands
+detach("package:aqp", unload=TRUE)
+
+```
+
+###Evaluate Stocks by Land Use - Land Cover Class
+
+Initially, simple summaries of SOC stocks by depth increment were evaluated by land use -land cover class and region. Region and land use are conflated as class presence and contribution to SOC pool varies by Region see  Loecke and Soil Survey Staff [@soilsurveystaffrapid2017] for more information. While there are small differences in average stocks between land use - land cover classes, they are not statistically or meaningfully significant.
+
+
+#### Fig S2. Boxplots of SOC stocks by land use - land cover class
+
+``` {r supp_box, eval=T, fig.height = 3}
+knitr::opts_chunk$set(echo = T, comment = "#", message=FALSE, warning = FALSE)
+
+SOCpedons <- read.csv("RaCA_SOC_pedons.csv", stringsAsFactors = F)
+#only include pedons with valid stock calculations to 100cm
+S <- SOCpedons[!is.na(SOCpedons$SOCstock100),]
+S$MO <- factor(S$MO)
+
+#check levels of LULC; change and relabel if needed
+#levels(S$LU)
+S$LU <- factor(S$LU, levels=c('C', 'F', 'P', 'R', 'W', 'X'),
+               labels=c('Cropland', 'Forestland',
+                        'Pastureland', 'Rangeland', 'Wetland', 'CRP'))
+#CRP - Conservation Reserve Program
+
+
+#Create Boxplots for 100cm SOC stocks
+s <- na.omit(S[ ,c("LU","MO","SOCstock100")])
+#limit data used to those with relevant values
+
+B <-  ggplot(s, aes(y =SOCstock100, x = LU)) + geom_boxplot()
+
+Bl <- B + labs(x ="\n Land Use - Land Cover Class \n",
+               y=expression(paste("SOC stock (Mg ha"^-1,") to 100cm"))) + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+
+#Create Boxplots for 30cm SOC stocks
+s30 <- na.omit(S[,c("LU","MO","SOCstock30")])
+#limit data used to those with relevant values
+
+B30 <-  ggplot(s30, aes(y =SOCstock30, x = LU)) + geom_boxplot()
+
+B30l <- B30 + labs(x ="\n Land Use - Land Cover Class \n",
+                   y=expression(paste("SOC stock (Mg ha"^-1,") to 30cm"))) + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+
+#Create Boxplots for 5cm SOC stocks
+s5 <- na.omit(S[,c("LU","MO","SOCstock5")])
+#limit data used to those with relevant values
+
+B5 <-  ggplot(s5, aes(y =SOCstock5, x = LU)) + geom_boxplot()
+
+
+B5l <- B5 + labs(x ="\n Land Use - Land Cover Class \n",
+                 y=expression(paste("SOC stock (Mg ha"^-1,") to 5cm"))) + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+#print plots
+Bl
+
+B30l
+
+B5l
+```
+
+
+SOC stocks are not normally distributed across or within land use -land cover classes.Converting SOC stocks by natural log creates a distribution more suitable for statistical comparison.
+
+#### Fig. S3. Distribution of SOC stocks by land use - land cover class
+``` {r dist, eval=T, cache=T}
+knitr::opts_chunk$set(echo = T, comment = "#", message=FALSE, warning = FALSE)
+
+# the distribution of SOC stocks in not normal
+dist <- ggplot(S, aes(x =SOCstock100)) +
+  geom_density(aes(fill=LU), alpha = 0.5)+
+  labs(fill ="Land Use - Land Cover Class",
+       x=expression(paste("SOC stock (Mg ha"^-1,") to 100cm")))
+
+#see implementation ggplot development package for a better visual of distribution by land use class
+#https://raw.githubusercontent.com/ncss-tech/soil-pit/master/sandbox/skye/joy_plots.R
+
+dist
+
+dist_logx <- ggplot(S, aes(x =SOCstock100)) +
+  geom_density(aes(fill=LU), alpha = 0.5)+
+  labs(fill ="Land Use - Land Cover Class",
+       x=expression(paste("SOC stock (Mg ha"^-1,") to 100cm")))+
+  scale_x_log10()  
+
+#see implementation ggplot development package for a better visual of distribution by land use class
+#https://raw.githubusercontent.com/ncss-tech/soil-pit/master/sandbox/skye/joy_plots.R
+
+dist_logx
+```
+
+
+#### Fig. S4. Boxplots on a log scale of SOC stocks by land use - land cover class  
+``` {r logbox, eval=T, fig.height = 4, cache=T}
+knitr::opts_chunk$set(echo = T, comment = "#", message=FALSE, warning = FALSE)
+
+
+#Modify scales to log for each depth increment
+B5L <- B5 +
+  labs(x ="\n", y=expression(paste("SOC stock (ln Mg ha"^-1,") to 5cm"))) +
+  scale_y_log10() + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+B30L <- B30 + labs(x ="\n Land Use - Land Cover Class \n",
+                   y=expression(paste("SOC stock (ln Mg ha"^-1,") to 30cm"))) +
+  scale_y_log10() +  
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+BL <- B +
+  labs(x ="\n Land Use - Land Cover Class  \n",
+       y=expression(paste("SOC stock (ln Mg ha"^-1,") to 100cm"))) +
+  scale_y_log10() +  
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+#print log plots
+
+B5L
+B30L
+BL
+
+```
+
+
+#### Fig. S5. Boxplots on a log scale of SOC stocks by Region
+``` {r logbox2, eval=T, fig.height = 4, cache=T}
+knitr::opts_chunk$set(echo = T, comment = "#", message=FALSE, warning = FALSE)
+
+#Create Boxplots for 100cm SOC stocks
+
+Br <-  ggplot(s, aes(y =SOCstock100, x= MO)) +
+  geom_boxplot()
+
+Brl <- Br +
+  labs(x ="\n RaCA Region \n", 
+       y=expression(paste("SOC stock (Mg ha"^-1,") to 100cm"))) + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+Br30 <-  ggplot(s30, aes(y =SOCstock30, x = MO)) +
+  geom_boxplot()
+
+Br30l <- Br30 +
+  labs(x ="\n RaCA Region \n", 
+       y=expression(paste("SOC stock (Mg ha"^-1,") to 30cm"))) + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+
+Br5 <-  ggplot(s5, aes(y =SOCstock5, x = MO)) +
+  geom_boxplot()
+
+
+Br5l <- Br5 +
+  labs(x ="\n RaCA Region \n",
+       y=expression(paste("SOC stock (Mg ha"^-1,") to 5cm"))) + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+
+#Modify scales to log for each depth increment
+Br5L <- Br5 +
+  labs(x ="\n RaCA Region \n",
+       y=expression(paste("SOC stock (ln Mg ha"^-1,") to 5cm"))) +
+  scale_y_log10() + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+Br30L <- Br30 + 
+  labs(x ="\n RaCA Region \n", 
+       y=expression(paste("SOC stock (ln Mg ha"^-1,") to 30cm"))) + scale_y_log10() +  
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+BrL <- Br +
+  labs(x ="\nRaCA Region\n",
+       y=expression(paste("SOC stock (ln Mg ha"^-1,") to 100cm"))) +
+  scale_y_log10() +  
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=8),legend.text=element_text(size=12)) 
+
+#print log plots
+
+Br5L
+Br30L
+BrL
+
+rm(s,S,s30,s5,B, Bl, B30, B30l, B5, B5l, Br, Brl, Br30, Br30l, Br5, Br5l )
+
+```
+
+
+An alternate visualization method is to segment SOC stocks by additive depth increments then visualize those increments as a total sums on a chart. Aggregating by overall land use - land cover class mean emphasizes the differences between land use - land cover classes. Individual pedons are also important to consider, as individual region x land use-land cover class interactions show differences in the highest and lowest value pedons. This will be important to consider as the dataset is used for regional and local investigations. In Fig. S8, SOC pedon stocks to 100cm are sorted and ranked by both land use-land cover class and RaCA Region. The pedons with minimum, median (medoid) and maximum SOC stocks are displayed by region and land use - land cover classes. This represents the typical and extreme stocks found in various conditions.  
+
+#### Fig. S6. Stacked bar chart by Land Use - Land Cover Class
+```{r stackplot, eval=T, cache=T}
+
+#This section using an alternate scripting style with dplyr, tidyr and magrittr piping
+# list.of.packages
+detach(name=package:plyr, TRUE) #remove prior package to eliminate conflicts
+
+#this section uses
+library(dplyr)
+library(tidyr)
+
+SOCpedons <- read.csv("RaCA_SOC_pedons.csv", stringsAsFactors = F)
+
+ped <- SOCpedons[,2:11] #reassign table form modification
+
+#create factors for stacked bar plots
+ped$zero_to_stock5 <- ped$SOCstock5
+ped$five_to_stock30 <- ped$SOCstock30-ped$SOCstock5
+ped$thirty_to_stock100 <- ped$SOCstock100- ped$SOCstock30
+
+ped$LUGR <- as.factor(paste0(as.character(ped$LU),substr(ped$rcasiteid,2,5)))
+
+# check LU order
+#levels(ped$LU)
+ped$LU <- as.factor(ped$LU)
+ped$LU <- factor(ped$LU, levels(ped$LU)[c(5,2,3,4,1,6)])
+#levels(ped$LU)
+levels(ped$LU)<- c('Wetland', 'Forestland',
+                   'Pastureland',  "Rangeland", 'Cropland', 'CRP')
+
+
+#calculate depth increment and land use means
+td <-  ped %>%
+      select(upedon, MO, LU, LUGR, zero_to_stock5, five_to_stock30, thirty_to_stock100) %>%
+      filter(LU != 'CRP')  %>%  #limit to land use/cover classes with spatial extent
+      gather(Depth, SOCstock, zero_to_stock5, five_to_stock30, thirty_to_stock100) %>%
+      arrange(upedon) %>%
+      group_by(LU, Depth) %>%
+      summarize(
+        N = length(SOCstock),
+        SOC = mean(SOCstock, na.rm=T),
+        SOCmed = median(SOCstock, na.rm=T),
+        sd = sd(SOCstock, na.rm=T),
+        se = sd/sqrt(N),
+        CI_l = SOC-(se*1.96),
+        CI_u = SOC+ (se*1.96),
+        q25 = quantile(SOCstock, .25, na.rm=T),
+        q75 = quantile(SOCstock, .75, na.rm=T)) %>%
+      mutate(ID = paste(LU,  str_sub(Depth, -3, -1), sep ="_"))
+
+#recalculate with stock totals (correct placement of error bars)  
+
+ti <- ped %>%
+  select(upedon, MO, LU, LUGR, SOCstock5, SOCstock30, SOCstock100) %>%
+  filter(LU != 'CRP') %>%
+  gather(Depth, SOCstock, SOCstock5, SOCstock30, SOCstock100) %>%
+  group_by(LU, Depth) %>%
+  summarize(
+    tN = length(SOCstock),
+    tSOC = mean(SOCstock, na.rm=T),
+    tsd = sd(SOCstock, na.rm=T),
+    tse = tsd/sqrt(tN),
+    lCI = tSOC-(tse*1.96),
+    uCI = tSOC+ (tse*1.96),        
+    tq25 = quantile(SOCstock, .25, na.rm=T),
+    tq75 = quantile(SOCstock, .75, na.rm=T)) %>%
+  mutate(ID = paste(LU,  str_sub(Depth, -3, -1), sep ="_"))%>%
+  mutate(Total = Depth)%>%
+  ungroup() %>%
+  select(-c(Depth, LU))
+
+  
+ t <- inner_join(td,ti, by = "ID")
+
+
+t$Depth <-  as.factor(t$Depth)
+t$Depth <- factor(t$Depth, levels(t$Depth)[c(3,1,2)])         #reorder factor levels
+#levels(t$Depth)
+levels(t$Depth) = c("0 to 5 cm","5 to 30 cm","30 to 100 cm") #relabel levels
+#levels(t$LU)
+
+d <- ggplot(t, aes(LU, SOC)) + 
+  geom_col(aes(fill=factor(Depth, levels = rev(levels(Depth))))) +
+  scale_y_reverse() +  
+  scale_fill_discrete(guide=guide_legend(reverse=T)) + 
+  labs(x ="Land Use - Land Cover Class",
+       y=expression(paste("SOC stock (Mg ha"^-1,")")), fill = "Depth Increment") +
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=10),legend.text=element_text(size=10)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+d
+
+
+de <- ggplot(t, aes(LU, SOC)) + 
+  geom_col(aes(fill=factor(Depth, levels = rev(levels(Depth))))) +
+  scale_y_reverse() +  
+  scale_fill_discrete(guide=guide_legend(reverse=T)) + 
+  geom_errorbar(aes(ymax=uCI , ymin= lCI), width = 0.08,
+                color = "black", size = 0.1) + 
+  ggtitle("SOC stocks by Depth Increment") + 
+  labs(x ="Land Use - Land Cover Class",
+       y=expression(paste("SOC stock (Mg ha"^-1,")")),
+       fill = "Depth Increment") + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=10),legend.text=element_text(size=10)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+de
+
+
+# reproduced with median and error bars representing credible intervals
+# from hierarchical Bayesian analysis (this document)
+
+rm(t,td,ti)
+
+```
+
+#### Fig S7. Pedons SOC Stock in Depth Increments. Selected pedons are characteristic of land Use - land cover class and raCA regions.  
+
+``` {r supp_ped, eval=T}
+knitr::opts_chunk$set(echo = T, comment = "#", message=FALSE, warning = FALSE)
+
+#use dplyer package (with piping) to select individual pedons for stacked plot display
+
+library(tidyverse)
+library(gridExtra)
+
+#filter for only LU classes with spatial extent
+O <- SOCpedons[SOCpedons$LU != "X", ]
+O$LUGR <- as.factor(paste0(as.character(O$LU),substr(O$rcasiteid,2,5)))
+O$LU <- as.factor(O$LU)
+# check LU order
+#levels(O$LU)9.
+O$LU <- factor(O$LU, levels(O$LU)[c(5,2,3,4,1)])
+#levels(O$LU)
+levels(O$LU)<- c('Wetland', 'Forestland', 'Pastureland',  "Rangeland",'Cropland')
+
+
+#create factors for stacked bar plots
+O$zero_to_five <- O$SOCstock5
+O$five_to_thirty <- O$SOCstock30-O$SOCstock5
+O$thirty_to_hundred <- O$SOCstock100- O$SOCstock30
+
+#change orientation
+t <- melt(O, id = names(O[,c("rcasiteid", "upedonid", "MO", "LU", "LUGR")]), 
+          measure.vars= names(O[,c("zero_to_five", "five_to_thirty",
+                                   "thirty_to_hundred")]))
+#change names of variable and value fields
+names(t)[6] <- "Depth"
+names(t)[7] <- "SOCstock"
+
+t$Depth <-  as.factor(t$Depth)
+
+#levels(t$Depth) #check factor levels
+#t$Depth <- factor(t$Depth, levels(t$Depth)[c(3,1,2)]   # reorder factor levels if needed
+
+levels(t$Depth) = c("0 to 5 cm","5 to 30 cm","30 to 100 cm")
+t$Region <- as.factor(t$MO)
+
+
+#str(t) #check that names and levels are correct
+
+t$SOCstock <- ifelse(is.na(t$SOCstock), 0, t$SOCstock)
+
+#assign a rank value to all pedons within each LU and Region (based on total SOC to 100cm)
+P <- t %>%
+  group_by(MO, LU, rcasiteid) %>%
+  summarise(Total = sum(SOCstock, na.rm=T)) %>%
+  arrange(MO, LU, Total) %>%
+   mutate(rank = dense_rank(Total))
+  
+#select pedons for each region and LU (min, max, medoid)
+ R <- P %>%
+  group_by (MO, LU) %>%
+  summarize(Max = max(rank, na.rm=T),
+                      Min = min(rank, na.rm=T), 
+                       Med = round(median(rank, na.rm=T),digits=0))%>%
+  gather(typ, rank, -c(MO,LU))
+
+#Join selections to ranks and then to pedons             
+Pr <- P  %>% right_join(R)
+pr <- Pr %>% left_join(t)
+
+#head(pr)
+#
+#prep levels for plotting
+levels(pr$Depth) <- c("0 to 5 cm","5 to 30 cm","30 to 100cm")
+pr$Depth <- ordered(pr$Depth, levels =c("30 to 100cm", "5 to 30 cm","0 to 5 cm" ) )
+
+
+#change variable for clearer labeling
+pr$Region <- as.factor(paste0("Region ", pr$MO))
+
+O$LU <- factor(O$LU, levels(O$LU)[c(5,2,3,4,1)])
+
+pr$Type <- as.factor(pr$typ)
+levels(pr$Type) = c("Highest",  "Medoid", "Lowest" )
+
+ggplot(pr[pr$MO %in% seq(1:4) , ],aes(Type, SOCstock)) +
+  geom_bar(stat = "identity", aes(fill=Depth)) + 
+   scale_y_reverse() + scale_fill_discrete(guide=guide_legend(reverse=T)) +
+  facet_grid(Region~LU,  scales="free") +
+  labs(y=expression(paste("SOC stock (Mg ha"^-1,")")),
+       fill = "Depth Increment")+
+  theme(legend.position="top",
+        axis.text.x=element_text(angle=-45, hjust = -.01),
+        axis.title.x=element_blank())
+
+ggplot(pr[pr$MO %in% seq(5,8,1) , ],aes(Type, SOCstock)) +
+  geom_bar(stat = "identity", aes(fill=Depth)) + 
+   scale_y_reverse() + scale_fill_discrete(guide=F) +
+  facet_grid(Region~LU, scales="free") +
+  labs(y=expression(paste("SOC stock (Mg ha"^-1,")")),
+       x="Pedon Type", fill = "Depth Increment")+
+  theme(legend.position="top", axis.text.x=element_text(angle=-45, hjust = -.01))
+
+ggplot(pr[pr$MO %in% seq(9,12,1) , ], aes(Type, SOCstock)) +
+  geom_bar(stat = "identity", aes(fill=Depth)) + 
+   scale_y_reverse() +
+  scale_fill_discrete(guide=guide_legend(reverse=T)) +
+  facet_grid(Region~LU,  scales="free") +
+  labs(y=expression(paste("SOC stock (Mg ha"^-1,")")), fill = "Depth Increment")+
+  theme(legend.position="top",  axis.text.x=element_text(angle=-45, hjust = -.01),
+        axis.title.x=element_blank(),strip.text.y=element_text(size=6) )
+
+
+ggplot(pr[pr$MO %in% c(13,14,15,16,18) ,], aes(Type, SOCstock)) +
+  geom_bar(stat = "identity", aes(fill=Depth)) +
+  scale_y_reverse() + scale_fill_discrete(guide=F) +
+  facet_grid(Region~LU, scales="free") +
+  labs(y=expression(paste("SOC stock (Mg ha"^-1,")")),
+       x="Pedon Type", fill = "Depth Increment") +
+  theme(legend.position="top",
+        axis.text.x=element_text(angle=-45, hjust = -.01),
+        strip.text.y=element_text(size=6))
+
+rm(O, P, Pr, pr, g)
+```
+
+A driving factor in the irregularities between land use - land cover classes and regions are associated with the distributions of organic horizons (denoted as a master horizon 'O').  Nearly all regions have cases with thin organic horizons in forestland. While in some regions, most organic horizons occur in wetlands; in others, there are many organic horizons in cropland and pastureland land uses. This indicates the difficulty in  using the hybrid land Use - land Cover classes  to aggregate and compare SOC stocks successfully. Wetlands are applied in this study as a land use, but soils that developed under wetlands will still retain some wetland characteristics, like O horizons, after land use has been converted. In region 2, for instance, there are croplands on soils that formed in wetland developed organic soils. These soils have relatively high SOC and bulk density leading to high SOC stocks.
+
+
+####Fig. S8. Mosaic of contingency values indicating the proportion master horizons occurring in each land use - land cover class, calculated and graphed separately for RaCA Region.
+``` {r supp3_hor, eval=T, cache=T}
+knitr::opts_chunk$set(echo = T, comment = "#",
+                      message=FALSE, warning = FALSE, fig.width=6, fig.height=6)
+
+library(ggmosaic)
+
+#The disribution of SOC depends more on soil type
+# - mineral vs. organic than land use/land cover
+
+#create a mosaic (contingency plot to highlight this)
+#limit sample data to major Master horizons and LULC classes with spatial extent
+h <- samp[samp$M %in% c("A", "E", "B", "C", "O", "R") & samp$LU != 'X', ]
+
+#set up the factors for plotting
+#master horizon
+h$M<- droplevels(h$M)
+h$M <- factor(h$M, levels = c("O", "A", "E", "B" ,"C", "R"))
+#land use/land cover Class
+h$LU <- droplevels(h$LU)
+h$LU <- factor(h$LU, levels = c('W','F','P', 'R', 'C'))
+#levels(h$LU) #check levels
+levels(h$LU)<- c('Wetland', 'Forestland', 'Pastureland',  "Rangeland",'Cropland')
+#region label
+h$Region <- factor(paste0("Region ", h$MO))
+h$Region <- reorder(h$Region, h$MO, mean)                   
+
+
+              
+
+M1 <- ggplot(data = h[h$MO %in% seq(1:4) ,]) +
+  geom_mosaic(aes( x = product(M, LU), fill=factor(M)), na.rm=TRUE) + 
+   facet_grid(.~Region) + 
+  scale_fill_brewer(palette="Set1")  +  
+    labs(title = '', y ="Master Horizon Proportion", 
+         x="Land Use - Land Cover Proportion") +
+  theme(legend.position="none", 
+        axis.text.x=element_text(angle=-45, hjust = .1), 
+        axis.title.y = element_text(size = 12), 
+        title = element_text(size = 8), 
+        axis.title.x=element_blank() )
+
+M2 <- ggplot(data = h[h$MO %in% seq(5,8) ,] ) +
+  geom_mosaic(aes( x = product(M, LU), fill=factor(M)), na.rm=TRUE) + facet_grid(.~Region) + 
+  scale_fill_brewer(palette="Set1")  +  
+    labs(y ="Master Horizon Proportion", x="Land Use - Land Cover Class Proportion") +      
+  theme(legend.position="top", legend.title = element_blank(),
+        axis.text.x=element_text(angle=-45, hjust = .1, size = 8),
+        axis.text.y = element_text(size = 6),
+        axis.title.y = element_text(size = 12) )+
+  guides(fill = guide_legend(nrow = 1)) 
+
+                                           
+M3<-ggplot(data = h[h$MO %in% seq(9,12) ,] ) +
+  geom_mosaic(aes( x = product(M, LU), fill=factor(M)), na.rm=TRUE) +   facet_grid(.~Region) + 
+  scale_fill_brewer(palette="Set1")  + 
+    labs(title = ' ', y ="Master Horizon Proportion",
+         x="Land Use - Land Cover Proportion") +      
+  theme(legend.position="none",
+        axis.text.x=element_text(angle=-45, hjust = .1),
+        axis.title.x=element_blank(), axis.title.y = element_text(size = 12) )
+                                           
+M4 <- ggplot(data = h[h$MO %in% c(13,14,15,16,18) ,] ) +
+  geom_mosaic(aes( x = product(M, LU), fill=factor(M)), na.rm=TRUE) +
+  facet_grid(.~Region) + 
+  scale_fill_brewer(palette="Set1")  +  
+    labs(y ="Master Horizon Proportion", 
+         x="Land Use - Land Cover Class Proportion", 
+         fill = "Master Horizon") + 
+  theme(legend.position="top", 
+        axis.text.x=element_text(angle=-45, hjust = .1, size =6),
+        legend.title = element_blank(), 
+        axis.text.y=element_text(size=8), 
+        axis.title.y = element_text(size = 12)) +
+  guides(fill = guide_legend(nrow = 1))  
+
+M1
+M2
+M3
+M4
+
+
+```
+
+
+###Mapping procedures
+The RaCA site locations were assigned from GPS latitude and longitude recorded according to the RaCA Field Sampling Protocols [@soilsurveystaffrapid2017]. Polygons were created for RaCA regions by editing the 2008 MO layer (obtained from the National Soil Survey Center) to remove areas not considered part of CONUS. All geographic files were manipulated in the projected coordinate system 'USA_Contiguous_Albers_Equal_Area_Conic_USGS_version' on the NAD North America 1983 Datum. 
+The basis of the RaCA experimental design and total stock calculations was a combined raster file of the FY12 gSSURGO [@Wickham2009] and 2006 NLCD [@Fry2011] snapped to 30m  grid cells. Each grid cell was assigned a combined LUGR label as described above. The LUGR classes were used to aggregate pedon SOC stocks. Pedon stocks were transformed by natural log to better approach normality and then averaged, then the mean value of each LUGR class was back-transformed and this geometric mean assigned and  mapped by individual raster cell across CONUS. Standard pyramids were used to smooth visual appearance when zoomed beyond individual raster cells. The pixel count of each LUGR class was used to weight estimates of total CONUS SOC stocks. Total area of each LUGR is equal to the count of each pixel multiplied by the area (or width x height, in this case 30m x 30m) of each pixel.
+To display interpolated values between mapped areas, the ordinary kriging function in Geostatistical Analyst __(ArcGIS, ESRI Inc.)__ was used. Pedon SOC to 100cm was log transformed and a constant trend removal was applied to create a prediction surface. An empirical stable semi-variogram with 12 lags of 125m was used to determine kriging weights. The prediction surface captures a fair amount of local variability at CONUS scale but does not over-represent local distributions at the landscape scale. Those estimates were clipped using region boundaries to match the extent of CONUS covered by LUGR classes. 
+
+```{r btLUGR, eval=T, warning=F, error=F, cache=T}
+
+library(plyr) #add package back 
+#combine land use - land cover class and  soil group - LUGR
+
+SOCpedons$LUGR <- as.factor(paste0(as.character(SOCpedons$LU),
+                                   substr(SOCpedons$rcasiteid,2,5)))
+
+#######################################################################
+#CALCULATE LUGR means
+#transform each pedon value to better approximate normality
+#then back transform for export
+
+##################################################
+
+#calculate natural log of each depth stock of interest
+lnLUGr5 <- aggregate(log(SOCstock5)~MO+LU+LUGR+MOGrLU, data=SOCpedons, FUN=mean)
+names(lnLUGr5)[5] <- "lnLUGr5"
+lnLUGr30 <- aggregate(log(SOCstock30)~LUGR, data=SOCpedons, FUN=mean)
+names(lnLUGr30)[2] <- "lnLUGr30"
+lnLUGr100 <- aggregate(log(SOCstock100)~LUGR, data=SOCpedons, FUN=mean)
+names(lnLUGr100)[2] <- "lnLUGr100"
+
+LUGrsd5 <- aggregate(log(SOCstock5)~LUGR, data=SOCpedons, sd)
+names(LUGrsd5)[2] <- "lnLUGrsd5"
+LUGrsd30 <- aggregate(log(SOCstock30)~LUGR, data=SOCpedons, sd)
+names(LUGrsd30)[2] <- "lnLUGrsd30"
+LUGrsd100 <- aggregate(log(SOCstock100)~LUGR, data=SOCpedons, sd)
+names(LUGrsd100)[2] <- "lnLUGrsd100"
+
+
+LUGrse5 <- aggregate(log(SOCstock5)~LUGR, data=SOCpedons,
+                     function(x) c(SE = sd(x)/sqrt(length(x))))
+names(LUGrse5)[2] <- "lnLUGrse5"
+LUGrse30 <- aggregate(log(SOCstock30)~LUGR,
+                      data=SOCpedons, function(x) c(SE = sd(x)/sqrt(length(x))))
+names(LUGrse30)[2] <- "lnLUGrse30"
+LUGrse100 <- aggregate(log(SOCstock100)~LUGR,
+                       data=SOCpedons, function(x) c(SE = sd(x)/sqrt(length(x))))
+names(LUGrse100)[2] <- "lnLUGrse100"
+
+#bind columns of mean and se for each depth
+LUGR5 <- cbind(lnLUGr5 , LUGrsd5[2], LUGrse5[2])
+LUGR30 <- cbind(lnLUGr30, LUGrsd30[2], LUGrse30[2])
+LUGR100 <- cbind(lnLUGr100,LUGrsd100[2], LUGrse100[2])
+
+LUGR530<- plyr::join(LUGR5, LUGR30, by = "LUGR")
+LUGR <- plyr::join(LUGR530, LUGR100, by = "LUGR")
+
+#take out replicate columns and rename
+
+names(LUGR)<- c("MO", "LU", "LUGR", "MOGRLU", "lnSOC5",
+                "lnSOCsd5","lnSOCse5", "lnSOC30", "lnSOCsd30",
+                "lnSOCse30", "lnSOC100","lnSOCsd100","lnSOCse100")
+
+
+LUGR$lnCIl5 <- with(LUGR, lnSOC5-lnSOCse5*1.96)
+LUGR$lnCIu5 <- with(LUGR, lnSOC5+lnSOCse5*1.96)
+
+LUGR$lnCIl30 <- with(LUGR, lnSOC30-lnSOCse30*1.96)
+LUGR$lnCIu30 <- with(LUGR, lnSOC30+lnSOCse30*1.96)
+
+LUGR$lnCIl100 <- with(LUGR, lnSOC100-lnSOCse100*1.96)
+LUGR$lnCIu100 <- with(LUGR, lnSOC100+lnSOCse100*1.96)
+
+#write.table(LUGR, "LUGR_ln.csv", sep=",", row.names=F)
+
+#back transform
+bt_LUGR <- cbind(LUGR[1:4], exp(LUGR[5:length(LUGR)]))
+#rename columns
+names(bt_LUGR)[5:length(bt_LUGR)] <- gsub('ln', 'bt_', names(bt_LUGR[5:length(bt_LUGR)]))
+
+#export data - to be used with ArcGIS in spatial joins
+write.table(bt_LUGR, "bt_LUGR_wCL.csv", sep=",", row.names=F)
+#write.table(LUGR, "LUGR_ln_summary.csv", sep=",", row.names=F)
+
+rm(lnLUGr100, lnLUGr30, lnLUGr5, LUGR5, LUGR30, LUGR100,
+   LUGR530, LUGrsd5, LUGrsd30, LUGrsd100, LUGrse5, LUGrse30, LUGrse100)
+
+```
+
+
+###Summary for Region Maps
+
+```{r wtRegion, eval=T, cache=T}
+
+#use this package for weighted mean calculation
+library(Hmisc)
+
+wt <- plyr::join(LUGR, LUGR_wt, by = "LUGR")
+wt$MO <- factor(wt$MO)
+wt$group_count <- wt$Count
+wt <- wt[wt$LU != "X" ,] #limit to LULC classes with spatial extent.
+wt <- wt[ !is.na(wt$group_count), ] #limit to classes with pixels.
+
+#Overall weighted means
+ln_wt_avg <- ddply(wt, .(), plyr::summarise, 
+                   wmn5 = weighted.mean(lnSOC5, group_count, na.rm=T),
+                   wmn30 = weighted.mean(lnSOC30, group_count,na.rm=T),
+                   wmn100 = weighted.mean(lnSOC100, group_count, na.rm=T),
+                  wsd5 = sqrt(wtd.var(lnSOC5, w = as.numeric(group_count), na.rm=T)),
+                   wsd30 = sqrt(wtd.var(lnSOC30, as.numeric(group_count), na.rm=T)),
+                   wsd100 = sqrt(wtd.var(lnSOC100, as.numeric(group_count), na.rm=T))
+                 )
+
+#Region (MO) weighted means
+ln_wt_avg_MO <- ddply(wt, "MO", plyr::summarise,
+                      N = sum(!is.na(lnSOC5)),    
+                   wmn5 = weighted.mean(lnSOC5, group_count, na.rm=T),
+                  wmn30 = weighted.mean(lnSOC30, group_count,na.rm=T),
+                  wmn100 = weighted.mean(lnSOC100, group_count, na.rm=T),
+                  t.wm.100 = wtd.mean(lnSOC100, as.numeric(group_count), na.rm=T),
+                  wsd5 = sqrt(wtd.var(lnSOC5, as.numeric(group_count), na.rm=T)),
+                  wsd30 = sqrt(wtd.var(lnSOC30, as.numeric(group_count), na.rm=T)),
+                  wsd100 = sqrt(wtd.var(lnSOC100, as.numeric(group_count), na.rm=T)),
+                  se100 = wsd100/sqrt(N),
+                  CI100_l = wmn100 - 1.96*se100,
+                  CI100_u = wmn100 +  1.96*se100              
+                  )
+
+
+#Land use - land cover class (LU) weighted means 
+ln_wt_avg_LU <- ddply(wt, "LU", plyr::summarise,
+                      N = sum(!is.na(lnSOC5)),   
+                      wmn5 = weighted.mean(lnSOC5, group_count, na.rm=T),
+                   wmn30 = weighted.mean(lnSOC30, group_count,na.rm=T),
+                   wmn100 = weighted.mean(lnSOC100, group_count, na.rm=T),
+                   wsd5 = sqrt(wtd.var(lnSOC5, as.numeric(group_count), na.rm=T)),
+                   wsd30 = sqrt(wtd.var(lnSOC30, as.numeric(group_count), na.rm=T)),
+                   wsd100 = sqrt(wtd.var(lnSOC100, as.numeric(group_count), na.rm=T)),
+                   se100 = wsd100/sqrt(N),
+                   CI100_l = wmn100 - 1.96*se100,
+                   CI100_u = wmn100 +  1.96*se100
+                   ) 
+
+#Region (MO) and Land Use - land cover class (LU) weighted means 
+ln_wt_avg_LUbyMO <- ddply(wt, .(MO,LU), plyr::summarise, 
+                          N = sum(!is.na(lnSOC5)),   
+                          wmn5 = weighted.mean(lnSOC5, group_count, na.rm=T),
+                   wmn30 = weighted.mean(lnSOC30, group_count,na.rm=T),
+                   wmn100 = weighted.mean(lnSOC100, group_count, na.rm=T),
+                   wsd5 = sqrt(wtd.var(lnSOC5, as.numeric(group_count), na.rm=T)),
+                   wsd30 = sqrt(wtd.var(lnSOC100, as.numeric(group_count), na.rm=T)),
+                   wsd100 = sqrt(wtd.var(lnSOC30, as.numeric(group_count), na.rm=T)),
+                   se100 = wsd100/sqrt(N),
+                   CI100_l = wmn100 - 1.96*se100,
+                   CI100_u = wmn100 +  1.96*se100
+) 
+
+#values transformed after calculation
+LU_by_Region_summary <- ddply(wt, .(MO,LU), plyr::summarise, 
+                          N = sum(!is.na(lnSOC5)),
+                          rCount = sum(group_count, na.rm=T),
+                          wmn5 = exp(weighted.mean(lnSOC5, group_count, na.rm=T)),
+                   wmn30 = exp(weighted.mean(lnSOC30, group_count,na.rm=T)),
+                   wmn100 = exp(weighted.mean(lnSOC100, group_count, na.rm=T)),
+                   wsd5 = exp(sqrt(wtd.var(lnSOC5, as.numeric(group_count), na.rm=T))),
+                   wsd30 = exp(sqrt(wtd.var(lnSOC100, as.numeric(group_count), na.rm=T))),
+                   wsd100 = exp(sqrt(wtd.var(lnSOC30, as.numeric(group_count), na.rm=T))),
+                   se100 = exp(wsd100/sqrt(N)),
+                   CI100_l = wmn100 - 1.96*se100,
+                   CI100_u = wmn100 +  1.96*se100
+) 
+
+#values transformed after calculations
+Region_summary <- ddply(wt, .(MO), plyr::summarise, 
+                          N = sum(!is.na(lnSOC5)),
+                            rCount = sum(group_count, na.rm=T),
+                          wmn5 = exp(weighted.mean(lnSOC5, group_count, na.rm=T)),
+                   wmn30 = exp(weighted.mean(lnSOC30, group_count,na.rm=T)),
+                   wmn100 = exp(weighted.mean(lnSOC100, group_count, na.rm=T)),
+                   wsd5 = exp(sqrt(wtd.var(lnSOC5, as.numeric(group_count), na.rm=T))),
+                   wsd30 = exp(sqrt(wtd.var(lnSOC100, as.numeric(group_count), na.rm=T))),
+                   wsd100 = exp(sqrt(wtd.var(lnSOC30, as.numeric(group_count), na.rm=T))),
+                   se100 = exp(wsd100/sqrt(N)),
+                   CI100_l = wmn100- 1.96*se100,
+                   CI100_u = wmn100 +  1.96*se100
+)
+
+#write.table(Region_summary, "Region_summary.csv", sep=",", row.names=F)
+
+#compare calculate a region total based on polygon
+region_pool <- plyr::join(Region_summary, region, by = "MO")
+write.table (region_pool, "region_pool.csv", row.names=F)
+#calculate totals
+region_pool$sum_pixelSOC100 <- region_pool$wmn100 *
+  region_pool$rCount*30*30/10000*1e-9 #convert 30m sq pixels to ha
+region_pool$sum_polygonSOC100 = region_pool$wmn100 *
+  region_pool$Shape_Area/10000*1e-9 #convert m2 area to ha
+rPool1 <- region_pool[,c(1:2,4:12)]
+rPool2 <- region_pool[,c(1:3,13,15:18)]
+
+rSummary  <- as.data.frame(rbind(cbind("SOC stocks in evaluated pixels",
+                                       sum(region_pool$sum_pixelSOC100)),
+                                 cbind("SOC stocks Weighted Means by Region",
+                                       sum(region_pool$sum_polygonSOC100))))
+
+rSummary <- data.frame(SOCpool=c("SOC stocks in evaluated pixels",
+                                 "SOC stocks Weighted Means by Region"),
+                       Pg=c(sum(region_pool$sum_pixelSOC100),
+                            sum(region_pool$sum_polygonSOC100)))
+
+names(rSummary) <- c("SOC pool", "Pg")
+
+
+#to display tables
+knitr::kable(LU_by_Region_summary, 
+             caption = 'Table S3. SOC stocks \n LU Summary with individual Regions',
+             digits = c(0,0,0,0,rep(1,9)))
+knitr::kable(rPool1,
+             caption = 'Table S4. SOC stocks \n Region Summary',
+             digits=c(rep(0,2),rep(2,10)))
+knitr::kable(rPool2,
+             caption = 'Table S5. Regional summary of polygon attributes',
+             digits=c(rep(0,3),rep(1,5)))
+knitr::kable(rSummary,  
+             caption = 'Table S6. Simple summary of CONUS SOC Pool',
+             digits = c(0,2))
+
+
+#remove package that may interfere with other commands
+detach("package:Hmisc", unload=TRUE)
+
+```
+
+
+#### Fig. S9. Maps of SOC by site location, regional aggregation and interpolation.
+
+
+```{r sum_maps, eval=T, out.width="100%"}
+library(png)
+
+#Each individual SOC pedon stock to 100cm plotted. 
+# Site locations are not publicly available due to confidentiality issues.
+
+#Sites
+url4 <- "https://nrcs.box.com/shared/static/qytwgxxdsjond1a27apwrr5t8zn55puj.png"
+if(!file.exists('RaCA_manuscript_ sites_100cm.png'))
+  download.file(url4, destfile = 'RaCA_manuscript_sites_100cm.png',
+                mode = 'wb')
+knitr::include_graphics("RaCA_manuscript_sites_100cm.png",
+                        auto_pdf = T, dpi = NULL)
+
+#Region averages as derived above by weighted means and regional polygons
+url5 <- "https://nrcs.box.com/shared/static/cn1l9sq84u8ngcmutkebw93z69u73jkf.png"
+if(!file.exists('RaCA_manuscript_Region.png'))
+  download.file(url5, 
+                destfile = 'RaCA_manuscript_Region.png',mode = 'wb') 
+knitr::include_graphics('RaCA_manuscript_Region.png',
+                        auto_pdf = T, dpi =NULL)
+
+#LUGR means joined to LUGR pixels
+url6 <- "https://nrcs.box.com/shared/static/fb87po3a1m6ni7lm2zfubqqzylsqli86.png"
+if(!file.exists('RaCA_manuscript_LUGR.png')) 
+  download.file(url6, destfile = 'RaCA_manuscript_LUGR.png',
+                mode = 'wb') 
+knitr::include_graphics('RaCA_manuscript_LUGR.png',
+                        auto_pdf = T, dpi = NULL)
+
+#Interpolated map unsing ordinary kriging
+url7 <- "https://nrcs.box.com/shared/static/koohn1vqb0fgb2fv64wnt75tbeavhbyw.png"
+if(!file.exists('RaCA_manuscript_OK_SOC100.png'))
+  download.file(url7,
+                destfile = 'RaCA_manuscript_OK_SOC100.png',
+                mode = 'wb') 
+knitr::include_graphics('RaCA_manuscript_OK_SOC100.png', 
+                        auto_pdf = T, dpi = NULL)
+
+
+```
+
+## Bayesian estimation of SOC stocks and pools with error estimates
+
+### Soil Organic Carbon Stock Estimates
+
+As discussed previously, SOC, bulk density and coarse fragment volume was obtained for each soil layer. The SOC density ($SOC_{\rho h}$) of each soil layer (h) (i.e., discrete sample) is calculated as follows:
+
+$$SOC_{\rho h}= \rho*[SOC]*(1-FRAG): eqn(1)$$
+where $\rho$ is the bulk density in ($g\ oven\ dried\ soil\ cm ^{-3}$), [SOC] is the concentration of organic C in soil ($gC\ 100g\ of\ soil ^{-1}$), and FRAG is the proportion of sample greater than 2mm in diameter. Pedon SOC stocks ($SOCstock_D$) were summed for soil depths (D) of 0-5, 0-30, and 0-100cm using the fixed depth increment approach described by [@VandenBygaart2007] and expressed in units of  $Mg C ha ^{-1}$: 
+
+$$SOCstock_D = \sum_{D}^H SOC_{\rho h} * T_h: eqn(2)$$
+where H is the number of soil layers within the specified soil depth (D), and Th is the layer thickness (cm).
+$$SOC_p = \sum_{d}^n SOC_d: eqn(3)$$
+
+#### Hierarchical Sampling Design Model
+
+To estimate mean SOC stocks ($Mg C ha^{-1}$ in the surface D cm of soil depth) for each level we built a hierarchical Bayesian linear regression model to accommodate the experimental design (see above) as;
+
+$$ lnSOCstock_{sLGR[D]} = \alpha_{LGR[D]} + \epsilon_{sLGR[D]}:eqn(4)$$
+$$\epsilon_{sLGR[D]} = Normal(0,\sigma^2_{sLGR[D]}):eqn(5)$$
+$$ \alpha_{LGR[D]} = \alpha_{GR[D]} + \epsilon_{LGR[D]}:eqn(6)$$
+$$\epsilon_{LGR[D]} = Normal(0,\sigma^2_{LGR[D]}):eqn(7)$$
+$$ \alpha_{GR[D]} = \alpha_{R[D]} + \epsilon_{GR[D]}:eqn(8)$$
+$$\epsilon_{GR[D]} = Normal(0,\sigma^2_{GR[D]}):eqn(9)$$
+$$ \alpha_{R[D]} = \alpha_{[D]} + \epsilon_{R[D]}:eqn(10)$$
+$$\epsilon_{R[D]} = Normal(0,\sigma^2_{R[D]}):eqn(11)$$
+where $lnSOCstock_{sLGR[D]}$ is the natural log of the SOCstock ($Mg C\ ha^{-1}$) for each sampling site (s) within each LUGR (L), soil group (G), and Region (R) to a given depth (D).  Square brackets around soil depth [D] indicate each depth is modeled separately. The ~ indicates a stochastic process whereas = indicates a deterministic calculation. Note that each level is conditional and constrained by the next higher level (e.g., $\epsilon_{R[D]}$ from eqn. 11 is used to determine $\alpha_{R[D]}$ in eqn. 10).  The variance parameters ($\epsilon_{sLGR[D]}$, $\epsilon_{LGR[D]}$, $\epsilon_{GR[D]}$, and $\epsilon_{R[D]}$) estimated in equations 5, 7, 9, and 11 represent the cumulative variance explained by each level of the sampling design (i.e., within LUGR, among LUGR, among Soil Group, and among Regions) [@Gelman2014]. The within LUGR level ($\epsilon_{sLGR[D]}$) contains all of variance due to the random selection of sites, intrasite spatial variation, and field and laboratory sampling and analysis errors. In contrast, the among LUGR ($\epsilon_{LGR[D]}$), among Soil Groups ($\epsilon_{GR[D]}$), and among Regions ($\epsilon_{R[D]}$) represent the additional variance observed at each level such that 100% of the sample variance observed in lnSOCstock is contained within the URd level. This sampling design was intended to capture as much variation as possible within the Soil Group level and minimize the within LUGR variance.
+
+This hierarchical model can be easily fit in a frequentist (e.g., random intercept linear model) or Bayesian hierarchical framework [@Gelman2014]. We chose a Bayesian estimation procedure to allow for greater flexibility in testing specific hypothesis and ease of error propagation. Our hierarchical model was fit using the Bayesian Monte Carlo package rstan [@Carpenter2016]. The program simulates the posterior probability distribution of the mean and variance parameters given the data and prior information using a Hamiltonian implementation of Markov chain Monte Carlo known as the No U-Turn Sampler (NUTS) [@Hoffman2014]. We used prior distributions from previous observations [@Guo2006] as well as uninformative flat priors in separate runs. Implementation details include 4 parallel independent chains, each with 6000 iterations, a warmup of 500 iterations was discarded, and a thinning rate (to minimize autocorrelation) of 75% resulting in posterior probability distribution (SOCppd) of 5500 iterations for each parameter (equations 3-10).  Each of the 5500 iterations can be interpreted as independent estimates of each parameter, which allows for credible intervals to be derived from each ppd. Here we designate the lower credible interval as the 2.5% quantile and the upper credible interval as the 97.5% quantile of each OCSppd.
+
+### Soil Organic Carbon Stock Calculations
+
+The SOC pools for each LULC, region, and CONUS level were derived by converting the ppds from the effects parameterization (as shown in equations 3-10) to the mean parameterization, back-transforming the SOCppds for the ith LUGR level (to generate the geometric mean for each iteration), multiplying these by the total pixel count of each LUGR map unit and the area of each pixel and then aggregating these LUGR-SOCppds to the LULU, regional, and CONUS scales as:
+$$LULCSOC_{ppd[D]}=\sum_{1}^L SOCstock_{ppd,i[D]} * P * Pixel count_i:eqn(12)$$
+$$RegionSOC_{ppd[D]}=\sum_{1}^R SOCstock_{ppd,i[D]} * P * Pixel count_i:eqn(13)$$
+$$CONUSSOC_{ppd[D]}=\sum SOCstock_{ppd,i[D]} * P * Pixel count_i:eqn(14)$$
+where, i is the ith LUGR ranging from 1 to the maximum LUGR count for each soil depth (D) contained in each LULC (L), Region (R), and CONUS. P is the pixel area (0.09 ha), and pixel count is number of pixels included in the ith LUGR area. L (as defined above) represents the number of LULU classes (L=5) and R indicates the number of regions.  The presented means and upper and lower credible intervals are derived from each SOCppd (equations 11-13).  The uncertainty presented for each SOC pool excludes uncertainty due to LUGR spatial mapping as we assume this uncertainty to be insignificant.
+
+### RaCA Full Bayesian Model on SOC stock ($Mg C\ ha^{-1}$)
+
+
+```{r hierarchical models, eval=T,  warning = F, message = F}
+#to download model code to working directory
+
+stan_model_100cm_url <- "https://nrcs.box.com/shared/static/3ijz0rm4apqbs79aujtdfcoux7ul036i.txt"
+ifelse(!file.exists('model7d no fe informed SOCstock100 v2017-04-10.txt'),
+       download.file(stan_model_100cm_url,
+                     destfile = 'model7d no fe informed SOCstock100 v2017-04-10.txt'),
+       "File already downloaded")
+
+stan_model_30cm_url <- "https://nrcs.box.com/shared/static/rsxmx87ggypkmz65dqgab40zj170sdj4.txt"
+ifelse(!file.exists('model7d no fe informed SOCstock30 v2017-04-10.txt'),
+       download.file(stan_model_30cm_url,
+                     destfile = 'model7d no fe informed SOCstock30 v2017-04-10.txt'),
+       "File already downloaded")
+
+stan_model_5cm_url <- "https://nrcs.box.com/shared/static/dmixsmxcxvjo58qo87jrd5u3jckmojck.txt"
+ifelse(!file.exists('model7d no fe informed SOCstock5 v2017-04-10.txt'),
+       download.file(stan_model_5cm_url,
+                     destfile = 'model7d no fe informed SOCstock5 v2017-04-10.txt'),
+       "File already downloaded")
+```
+
+#### Implementation of Rstan 
+This script derives MO, MOGr,LUGR, and intersite level estimates of stocks and error variation starting from pedon level SOC stocks ($Mg C\ ha^{-1}$). Multiple model constructions were considered before the following was found to be consistent with experimental design and goals of the intended inference. 
+
+##### RaCA - Total Stocks Start 5 cm loop
+
+```{r set soil depth5, eval=T, cache=F}
+##### Analysis Steps 
+# _Prepare Models_
+
+# 1. load pedon data for central pedon only.
+# 2. set up data frame for Stan modeling:  
+# data for Stan needs to have continous integers for factors, e.g. MO = 1:17 ,not 1:16 and 18
+# 3. construct list of data for Stan
+# 4. load libraries, Stan, lme4, etc
+# 5. read in Stan models
+# 6. run Stan model and save out as .rds - stan function
+# 7. use stan::extract to stanfit
+# 8. combine parameter samples in linear combinations
+# 9. compute summary stats
+# 
+# _Derive CONUS pool estimates_
+# 
+# 10. load gSSURGO pixel counts
+# 11. calculate area weighted stocks convert pixels to area (ha)
+# 12. combine pixel count and unweighted stock estimates at MO level
+# 13. for MO pools, multiple unweighted stock MO estimates by MO area, then sum to CONUS
+# 15. plot results for distribution of estimates
+# 16. calculate mean weighted stock estimates at each level
+
+depth <- 5
+saveRDS(depth, "depth_selection_5.rds")
+```
+
+```{r Stan modeling5, eval=T, cache=T}
+rm(list = ls() ) #clear environment
+# 1. load pedon data for central pedon only
+# 2. set up data frame for Stan modeling if not already before step #1
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_5.rds")
+SOCdepth <- paste0("SOCstock",depth)
+dat3 <- read.csv(file="RaCA_SOC_pedons.csv") # generated above
+
+dat3 <- dat3[!is.na(dat3[,SOCdepth]),] # needs to be clean separately for each depth
+dat3 <- dat3[order(dat3$MOGrLU),]
+dat3$MOi <- as.integer(as.factor(dat3$MO))
+# factors for Stan needs to have continous integers, e.g., MO = 1:17 ,not 1:16 and 18
+dat3$MOGri <- as.integer(as.factor(dat3$MOGr))
+labsi <- data.frame(MOGrLUi=1:length(unique(dat3$MOGrLU)),
+                    MOGrLU=unique(dat3$MOGrLU))
+dat3$MOGrLUi <- labsi[match(dat3$MOGrLU, labsi$MOGrLU),"MOGrLUi"] 
+labsi <- data.frame(LUi=1:length(unique(dat3$LU)), LU=sort(unique(dat3$LU)))
+dat3$LUi <- labsi[match(dat3$LU, labsi$LU),"LUi"] 
+dat3$lnSOC <- log(dat3[,SOCdepth])
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+
+saveRDS(dat3, fname)
+
+# 3. construct list of data for Stan
+dat <- list(N=length(dat3$lnSOC),
+            lnSOC=dat3$lnSOC,
+            MOi=dat3$MOi,
+            MOGri=dat3$MOGri,
+            MOGrLUi=dat3$MOGrLUi,
+            N_MOi=length(unique(dat3$MOi)),
+            N_MOGri=length(unique(dat3$MOGri)),
+            N_MOGrLUi=length(unique(dat3$MOGrLUi)))
+
+# 4. load libraries, Stan, lme4, etc and user functions ######
+
+library(rstan) # running rstan requires C++ compiler. 
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores()) # determines parallel processing
+if("lme4" %in% rownames(installed.packages()) == FALSE) {install.packages("lme4")}
+library(lme4)
+
+q97.5 <- function(x) quantile(x,.975)
+q2.5 <- function(x) quantile(x,.025)
+se <- function(x) sqrt(var(x)/length(x))
+multi.fun <- function(x) {
+  c(q2.5 = q2.5(x), mean = mean(x), median = median(x), q97.5 = q97.5(x))
+}
+
+# 5. read in Stan models
+# 7d model is informed by Guo et al.,2006, includes only random effects per experimental design
+fileName <- paste0("model7d no fe informed ", SOCdepth, " v",date,".txt")
+stan_code <- readChar(fileName, file.info(fileName)$size)
+
+# 6. run Stan model and save out as .rds - stan function, model fitting #####
+a <- Sys.time()
+resStan <- stan(model_code = stan_code, data = dat,
+                chains = 4, iter = 6000, warmup = 500,
+                thin = 4, verbose = F, cores = 4)
+saveRDS(resStan, file=paste0(fileName,".rds"))
+
+print(resStan, pars=c("Intercept","sigma_MOi","sigma_MOGri",
+                      "sigma_MOGrLUi","sigma")) # Rhat should=1
+print(fileName)
+Sys.time()  - a
+```
+
+```{r Manipulate Stan output5, eval=T, cache=T}
+# 7. use stan::extract to stanfit
+rm(list = ls() ) #clear environment
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_5.rds")
+SOCdepth <- paste0("SOCstock",depth)
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+fileName <- paste0("model7d no fe informed ", SOCdepth, " v",date,".txt.rds")
+dat3 <- readRDS(fname)
+modout7d <- readRDS(fileName)
+fitsum <- summary(modout7d,pars=c("sigma_MOi","sigma_MOGri",
+                                  "sigma_MOGrLUi","sigma"))
+fitsumtable <- as.data.frame(fitsum$summary)
+fitsumtable$percentvar <- fitsumtable$mean^2/sum(fitsumtable$mean^2)*100
+fitsumtable$cumpercvar <- rev(cumsum(rev(fitsumtable$percentvar)))
+
+fname2 <-paste0("fitsumtable sigmas ",SOCdepth, " v",date,".rds") 
+saveRDS(fitsumtable,file=fname2)
+
+fit_ss7d <- rstan::extract(modout7d, permuted=T)
+dMO <- dim(fit_ss7d$vary_MOi)[2]
+dMOGr <- dim(fit_ss7d$vary_MOGri)[2]
+dMOGrLU <- dim(fit_ss7d$vary_MOGrLUi)[2]
+dn <- dim(fit_ss7d$vary_MOi)[1]
+# 8. combine parameter samples in linear combinations for LUGR ######
+
+MOGrLUt <- aggregate(lnSOC~MOi+MOGri+MOGrLUi, data=dat3,length)
+MOGrt <- aggregate(lnSOC~MOi+MOGri, data=MOGrLUt,length)
+MOt <- aggregate(lnSOC~MOi, data=MOGrLUt,length)
+vary_MOGri <- vector()
+for(i in 1:dMOGr){
+  ff <- rep(fit_ss7d$vary_MOGri[,i],MOGrt[i,3]) 
+  vary_MOGri <- c(vary_MOGri,ff)
+  }
+ff <- NULL
+vary_MOi <- vector()
+for(i in 1:dMO){
+  ff <- rep(fit_ss7d$vary_MOi[,i],MOt[i,2]) 
+  vary_MOi <- c(vary_MOi,ff)
+}
+
+MOGrLU7d <- as.vector(fit_ss7d$vary_MOGrLUi[,]) + vary_MOGri + 
+  + vary_MOi + rep(as.vector(fit_ss7d$Intercept),dMOGrLU) 
+MOGrLUi=rep(MOGrLUt$MOGrLUi,each=dn)
+MOGrLU7ddf <- data.frame(MOGrLUi,MOGrLU7d)
+MOGrLU7ddf$MOi <- MOGrLUt[match(MOGrLU7ddf$MOGrLUi,MOGrLUt$MOGrLUi),"MOi"]
+MOGrLU7ddf$MOGri <- MOGrLUt[match(MOGrLU7ddf$MOGrLUi,MOGrLUt$MOGrLUi),"MOGri"]
+MOGrLU7ddf$MOGrLU <- dat3[match(MOGrLU7ddf$MOGrLUi,dat3$MOGrLUi),"MOGrLU"]
+#need to add MOGrLU to MOGrLU7ddf to match with pixel count df
+MOGrLU7ddf$realiz <- rep(1:dn,dMOGrLU)
+fname3 <-paste0("nonStan model MOGrLU 7d dataframe ",SOCdepth, " v",date,".rds")
+saveRDS(MOGrLU7ddf, fname3)
+mogr7ddf <- aggregate(MOGrLU7d~MOGri+realiz,data=MOGrLU7ddf,mean)
+
+fname3 <-paste0("nonStan model MOGr 7d dataframe ",SOCdepth, " v",date,".rds") 
+saveRDS(mogr7ddf, file=fname3)
+```
+
+```{r partitioning of variance5, cache=F, eval=T}
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_5.rds")
+SOCdepth <- paste0("SOCstock",depth)
+fname2 <-paste0("fitsumtable sigmas ",SOCdepth, " v",date,".rds") 
+fitsumtable  <- readRDS(fname2)
+
+kk <- knitr::kable(fitsumtable[,c(1,3:4,6,8,9:12)],digits = c(rep(3,5),0,2,1,1),
+             col.names = c("mean","sd","2.5%","50%","97.5%","n_eff",
+                           "Rhat","% variance","cumulative % variance"))
+fname3 <-paste0("fitsumtable sigmas kable",SOCdepth, " v",date,".rds") 
+saveRDS(kk, fname3 )
+
+```
+
+```{r Area aggrgation stats5, cache=F, eval=T}
+
+# 10 load gSSURGO pixel counts
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_5.rds")
+SOCdepth <- paste0("SOCstock",depth)
+LUGRpix <- read.csv("LUGR_pixelcount30m_label.csv",header=T)
+
+# table(substr(as.character(unique(LUGRpix$LUGR[nchar(as.character(LUGRpix$LUGR))==5])), 1,1))
+
+LUGRpix$MOGRLU <- ifelse(nchar(as.character(LUGRpix$LUGR))==5,
+                         paste0(substr(LUGRpix$LUGR,
+                                       2,5),substr(LUGRpix$LUGR,1,1)),"NA")
+fname3 <-paste0("nonStan model MOGrLU 7d dataframe ",SOCdepth, " v",date,".rds")
+pMOGrLUall <- readRDS(file=fname3)
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+dat3 <- readRDS(fname)
+pMOGrLUall$MOGrLU <- dat3[match(pMOGrLUall$MOGrLUi,dat3$MOGrLUi),"MOGrLU"]
+pMOGrLUall <- pMOGrLUall[!grepl(pattern="X",x=pMOGrLUall$MOGrLU),] # removel CRP
+pMOGrLUall$pixelcount <- LUGRpix[match(pMOGrLUall$MOGrLU,LUGRpix$MOGRLU),"Count"]
+pMOGrLUall2 <- pMOGrLUall[is.na(pMOGrLUall$pixelcount),] # checking for missing LUGR
+# table(droplevels(pMOGrLUall2$MOGrLU))
+pMOGrLUall$haperpixel <- 900/10000 # 30*30m grid
+
+# 11 calculate area weighted stocks
+pMOGrLUall$LUGrha <- pMOGrLUall$pixelcount*pMOGrLUall$haperpixel
+pMOGrLUall$MgCpLUGR <- pMOGrLUall$LUGrha*exp(pMOGrLUall$MOGrLU7d)
+# functions for stats
+q97.5 <- function(x) quantile(x,.975)
+q2.5 <- function(x) quantile(x,.025)
+se <- function(x) sqrt(var(x)/length(x))
+multi.fun <- function(x) {
+  c(q2.5 = q2.5(x), mean = mean(x), median = median(x), q97.5 = q97.5(x), sd=sd(x))
+}
+
+# 12 output summary stats for mapping ####
+LUGrMgCstats <-aggregate(MgCpLUGR~MOGrLU,data=pMOGrLUall,multi.fun) 
+# these intervals are meaningless
+fname2 <- paste0("LUGr MgC ",SOCdepth, " v",date,".rds") 
+saveRDS(LUGrMgCstats,file=fname2)
+
+pMOGrLUall$LUGRMgCha <- pMOGrLUall$MgCpLUGR/pMOGrLUall$LUGrha
+LUGrMgChastats <-aggregate(LUGRMgCha~MOGrLU,data=pMOGrLUall,multi.fun) 
+# these intervals are meaningless
+#LUGrMgChastats$LUGR <- paste0(substr(as.character(LUGrMgChastats$MOGrLU),
+#5,5),substr(as.character(LUGrMgChastats$MOGrLU), 1,4))
+fname4 <- paste0("LUGr stocks ",SOCdepth, " v",date,".rds") 
+saveRDS(LUGrMgChastats,file=fname4)
+fname5 <- paste0("LUGr stocks ",SOCdepth, " v",date,".csv")
+write.csv(LUGrMgChastats,fname5, row.names = F)
+
+# print(paste(round(sum(LUGrMgCstats$MgCpLUGR[,3])/1e9,2),"PG C in surface 100cm of CONUS as calculated from summing min, mean, and max of LUGR totals, is not appropriate as a CONUS esimate",
+#       "LCI/UCI",round(sum(LUGrMgCstats$MgCpLUGR[,1])/1e9,2),
+#       round(sum(LUGrMgCstats$MgCpLUGR[,4])/1e9,2),
+#       ". Most similar calculation method to Guo et al 2006"))
+
+CONUSMgCtemp <-aggregate(MgCpLUGR~realiz,data=pMOGrLUall,sum) 
+CONUSMgCstats <-multi.fun(CONUSMgCtemp$MgCpLUGR) 
+fname5 <- paste0("CONUSMgCstats ",SOCdepth, " v",date,".rds")
+saveRDS(CONUSMgCstats, file=fname5)
+# print(paste(round(CONUSMgCstats[2]/1e9,1),
+#             "PG C in surface 100cm of CONUS as calculated from summing LUGR totals",
+#             "LCI/UCI",round(CONUSMgCstats[1]/1e9,1),
+#             round(CONUSMgCstats[4]/1e9,1),
+#             ". This takes full advantage of the RaCA experimental design."))
+
+```
+
+End 5 cm loop
+
+
+##### RaCA - Total Stocks Start 30 cm loop
+
+```{r set soil depth30, eval=T}
+# Set soil depth increment to examine (options include 5, 30, 100 in units of cm)
+rm(list=ls())
+depth <- 30
+saveRDS(depth, "depth_selection_30.rds")
+```
+
+```{r Stan modeling30, eval=T, cache=T}
+rm(list = ls() ) #clear environment
+# 1. load pedon data for central pedon only (all of the following is labeled for 0-100cm)
+# 2. set up data frame for Stan modeling if not already before step #1
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_30.rds")
+SOCdepth <- paste0("SOCstock",depth)
+dat3 <- read.csv(file="RaCA_SOC_pedons.csv") # generated above
+
+dat3 <- dat3[!is.na(dat3[,SOCdepth]),] # needs to be clean separately for each depth
+dat3 <- dat3[order(dat3$MOGrLU),]
+dat3$MOi <- as.integer(as.factor(dat3$MO))# factors for Stan needs to have continous integers, e.g., MO = 1:17 ,not 1:16 and 18
+dat3$MOGri <- as.integer(as.factor(dat3$MOGr))
+labsi <- data.frame(MOGrLUi=1:length(unique(dat3$MOGrLU)), MOGrLU=unique(dat3$MOGrLU))
+dat3$MOGrLUi <- labsi[match(dat3$MOGrLU, labsi$MOGrLU),"MOGrLUi"] 
+labsi <- data.frame(LUi=1:length(unique(dat3$LU)), LU=sort(unique(dat3$LU)))
+dat3$LUi <- labsi[match(dat3$LU, labsi$LU),"LUi"] 
+dat3$lnSOC <- log(dat3[,SOCdepth])
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+
+saveRDS(dat3, fname)
+
+# 3. construct list of data for Stan
+dat <- list(N=length(dat3$lnSOC),
+            lnSOC=dat3$lnSOC,
+            MOi=dat3$MOi,
+            MOGri=dat3$MOGri,
+            MOGrLUi=dat3$MOGrLUi,
+            N_MOi=length(unique(dat3$MOi)),
+            N_MOGri=length(unique(dat3$MOGri)),
+            N_MOGrLUi=length(unique(dat3$MOGrLUi)))
+
+# 4. load libraries, Stan, lme4, etc and user functions ######
+
+library(rstan) # running rstan for the first time requires C++ compiler. 
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores()) # determines parallel processing
+if("lme4" %in% rownames(installed.packages()) == FALSE)
+  {install.packages("lme4")}
+library(lme4)
+
+q97.5 <- function(x) quantile(x,.975)
+q2.5 <- function(x) quantile(x,.025)
+se <- function(x) sqrt(var(x)/length(x))
+multi.fun <- function(x) {
+  c(q2.5 = q2.5(x), mean = mean(x), median = median(x), q97.5 = q97.5(x))
+}
+
+# 5. read in Stan models #####
+#### 7d model is informed from Guo et al., 2006 and includes only random effects per experimental design #####
+fileName <- paste0("model7d no fe informed ", SOCdepth, " v",date,".txt")
+stan_code <- readChar(fileName, file.info(fileName)$size)
+
+# 6. run Stan model and save out as .rds - stan function, model fitting #####
+a <- Sys.time()
+resStan <- stan(model_code = stan_code, data = dat,
+                chains = 4, iter = 6000, warmup = 500, 
+                thin = 4, verbose = F, cores = 4)
+saveRDS(resStan, file=paste0(fileName,".rds"))
+
+print(resStan, pars=c("Intercept","sigma_MOi","sigma_MOGri"
+                      ,"sigma_MOGrLUi","sigma")) # Rhat should=1
+print(fileName)
+Sys.time()  - a
+```
+
+```{r Manipulate Stan output30, eval=T, cache=T}
+# 7. use stan::extract to stanfit
+rm(list = ls() ) #clear environment
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_30.rds")
+SOCdepth <- paste0("SOCstock",depth)
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+fileName <- paste0("model7d no fe informed ", SOCdepth, " v",date,".txt.rds")
+dat3 <- readRDS(fname)
+modout7d <- readRDS(fileName)
+fitsum <- summary(modout7d,pars=c("sigma_MOi","sigma_MOGri",
+                                  "sigma_MOGrLUi","sigma"))
+fitsumtable <- as.data.frame(fitsum$summary)
+fitsumtable$percentvar <- fitsumtable$mean^2/sum(fitsumtable$mean^2)*100
+fitsumtable$cumpercvar <- rev(cumsum(rev(fitsumtable$percentvar)))
+
+fname2 <-paste0("fitsumtable sigmas ",SOCdepth, " v",date,".rds") 
+saveRDS(fitsumtable,file=fname2)
+
+fit_ss7d <- rstan::extract(modout7d, permuted=T)
+dMO <- dim(fit_ss7d$vary_MOi)[2]
+dMOGr <- dim(fit_ss7d$vary_MOGri)[2]
+dMOGrLU <- dim(fit_ss7d$vary_MOGrLUi)[2]
+dn <- dim(fit_ss7d$vary_MOi)[1]
+# 8. combine parameter samples in linear combinations for LUGR ######
+
+MOGrLUt <- aggregate(lnSOC~MOi+MOGri+MOGrLUi, data=dat3,length)
+MOGrt <- aggregate(lnSOC~MOi+MOGri, data=MOGrLUt,length)
+MOt <- aggregate(lnSOC~MOi, data=MOGrLUt,length)
+vary_MOGri <- vector()
+for(i in 1:dMOGr){
+  ff <- rep(fit_ss7d$vary_MOGri[,i],MOGrt[i,3]) 
+  vary_MOGri <- c(vary_MOGri,ff)
+  }
+ff <- NULL
+vary_MOi <- vector()
+for(i in 1:dMO){
+  ff <- rep(fit_ss7d$vary_MOi[,i],MOt[i,2]) 
+  vary_MOi <- c(vary_MOi,ff)
+}
+
+MOGrLU7d <- as.vector(fit_ss7d$vary_MOGrLUi[,]) + vary_MOGri + 
+  + vary_MOi + rep(as.vector(fit_ss7d$Intercept),dMOGrLU) 
+MOGrLUi=rep(MOGrLUt$MOGrLUi,each=dn)
+MOGrLU7ddf <- data.frame(MOGrLUi,MOGrLU7d)
+MOGrLU7ddf$MOi <- MOGrLUt[match(MOGrLU7ddf$MOGrLUi,MOGrLUt$MOGrLUi),"MOi"]
+MOGrLU7ddf$MOGri <- MOGrLUt[match(MOGrLU7ddf$MOGrLUi,MOGrLUt$MOGrLUi),"MOGri"]
+MOGrLU7ddf$MOGrLU <- dat3[match(MOGrLU7ddf$MOGrLUi,dat3$MOGrLUi),"MOGrLU"]
+#need to add MOGrLU to MOGrLU7ddf to match with pixel count df
+MOGrLU7ddf$realiz <- rep(1:dn,dMOGrLU)
+fname3 <-paste0("nonStan model MOGrLU 7d dataframe ",SOCdepth, " v",date,".rds")
+saveRDS(MOGrLU7ddf, fname3)
+mogr7ddf <- aggregate(MOGrLU7d~MOGri+realiz,data=MOGrLU7ddf,mean)
+
+fname3 <-paste0("nonStan model MOGr 7d dataframe ",SOCdepth, " v",date,".rds") 
+saveRDS(mogr7ddf, file=fname3)
+```
+
+```{r partitioning of variance30, cache=T, eval=T}
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_30.rds")
+SOCdepth <- paste0("SOCstock",depth)
+fname2 <-paste0("fitsumtable sigmas ",SOCdepth, " v",date,".rds") 
+fitsumtable  <- readRDS(fname2)
+
+kk <- knitr::kable(fitsumtable[,c(1,3:4,6,8,9:12)],
+                   digits = c(rep(3,5),0,2,1,1),
+             col.names = c("mean","sd","2.5%","50%","97.5%","n_eff","Rhat",
+                           "% variance","cumulative % variance"))
+fname3 <-paste0("fitsumtable sigmas kable",SOCdepth, " v",date,".rds") 
+saveRDS(kk, fname3 )
+
+```
+
+```{r Area aggrgation stats30, cache=T, eval=T}
+
+# 10 load gSSURGO pixel counts
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_30.rds")
+SOCdepth <- paste0("SOCstock",depth)
+LUGRpix <- read.csv("LUGR_pixelcount30m_label.csv",header=T)
+
+# table(substr(as.character(unique(LUGRpix$LUGR[nchar(as.character(LUGRpix$LUGR))==5])),1,1))
+LUGRpix$MOGRLU <- ifelse(nchar(as.character(LUGRpix$LUGR))==5,
+                         paste0(substr(LUGRpix$LUGR,
+                                       2,5),substr(LUGRpix$LUGR,1,1)),"NA")
+
+fname3 <-paste0("nonStan model MOGrLU 7d dataframe ",
+                SOCdepth, " v",date,".rds")
+pMOGrLUall <- readRDS(file=fname3)
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+dat3 <- readRDS(fname)
+pMOGrLUall$MOGrLU <- dat3[match(pMOGrLUall$MOGrLUi,dat3$MOGrLUi),"MOGrLU"]
+pMOGrLUall <- pMOGrLUall[!grepl(pattern="X",x=pMOGrLUall$MOGrLU),] # removel CRP
+pMOGrLUall$pixelcount <- LUGRpix[match(pMOGrLUall$MOGrLU,LUGRpix$MOGRLU),"Count"]
+pMOGrLUall2 <- pMOGrLUall[is.na(pMOGrLUall$pixelcount),] # checking for missing LUGR
+# table(droplevels(pMOGrLUall2$MOGrLU))
+pMOGrLUall$haperpixel <- 900/10000 # 30*30m grid
+
+# 11 calculate area weighted stocks
+pMOGrLUall$LUGrha <- pMOGrLUall$pixelcount*pMOGrLUall$haperpixel
+pMOGrLUall$MgCpLUGR <- pMOGrLUall$LUGrha*exp(pMOGrLUall$MOGrLU7d)
+# functions for stats
+q97.5 <- function(x) quantile(x,.975)
+q2.5 <- function(x) quantile(x,.025)
+se <- function(x) sqrt(var(x)/length(x))
+multi.fun <- function(x) {
+  c(q2.5 = q2.5(x), mean = mean(x), median = median(x), q97.5 = q97.5(x), sd=sd(x))
+}
+
+# 12 output summary stats for mapping ####
+LUGrMgCstats <-aggregate(MgCpLUGR~MOGrLU,data=pMOGrLUall,multi.fun) 
+# these intervals are of no value
+fname2 <- paste0("LUGr MgC ",SOCdepth, " v",date,".rds") 
+saveRDS(LUGrMgCstats,file=fname2)
+
+pMOGrLUall$LUGRMgCha <- pMOGrLUall$MgCpLUGR/pMOGrLUall$LUGrha
+LUGrMgChastats <-aggregate(LUGRMgCha~MOGrLU,data=pMOGrLUall,multi.fun) 
+# these intervals are of no value
+LUGrMgChastats$LUGR <- paste0(substr(as.character(LUGrMgChastats$MOGrLU),
+ 5,5),substr(as.character(LUGrMgChastats$MOGrLU), 1,4))
+fname4 <- paste0("LUGr stocks ",SOCdepth, " v",date,".rds") 
+saveRDS(LUGrMgChastats,file=fname4)
+fname5 <- paste0("LUGr stocks ",SOCdepth, " v",date,".csv")
+write.csv(LUGrMgChastats,fname5, row.names = F)
+
+# print(paste(round(sum(LUGrMgCstats$MgCpLUGR[,3])/1e9,2),
+#             "PG C in surface 100cm of CONUS as calculated from summing min,
+#             mean, and max of LUGR totals, , not appropriate as a CONUS esimate",
+#       "LCI/UCI",
+#       round(sum(LUGrMgCstats$MgCpLUGR[,1])/1e9,2),
+#       round(sum(LUGrMgCstats$MgCpLUGR[,4])/1e9,2),
+#       ". Most similar calculation method to Guo et al 2006"))
+
+CONUSMgCtemp <-aggregate(MgCpLUGR~realiz,data=pMOGrLUall,sum) 
+CONUSMgCstats <-multi.fun(CONUSMgCtemp$MgCpLUGR) 
+fname5 <- paste0("CONUSMgCstats ",SOCdepth, " v",date,".rds")
+saveRDS(CONUSMgCstats, file=fname5)
+# print(paste(round(CONUSMgCstats[2]/1e9,1),
+#             "PG C in surface 100cm of CONUS as calculated from summing LUGR totals",
+#             "LCI/UCI",round(CONUSMgCstats[1]/1e9,1),
+#             round(CONUSMgCstats[4]/1e9,1), 
+#             ". This takes full advantage of the RaCA experimental design."))
+
+```
+
+End 30 cm loop
+
+##### RaCA - Total Stocks Start 100 cm loop
+
+```{r set soil depth100, eval=T}
+# Set soil depth increment to examine (options include 5, 30, 100 in units of cm)
+rm(list=ls())
+depth <- 100
+saveRDS(depth, "depth_selection_100.rds")
+```
+
+```{r Stan modeling100, eval=T, cache=T}
+rm(list = ls() ) #clear environment
+# 1. load pedon data for central pedon only (all of the following is labeled for 0-100cm)
+# 2. set up data frame for Stan modeling if not already before step #1
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_100.rds")
+SOCdepth <- paste0("SOCstock",depth)
+dat3 <- read.csv(file="RaCA_SOC_pedons.csv") # generated above
+
+dat3 <- dat3[!is.na(dat3[,SOCdepth]),] 
+# needs to be clean separately for each depth
+dat3 <- dat3[order(dat3$MOGrLU),]
+dat3$MOi <- as.integer(as.factor(dat3$MO))
+# factors for Stan needs to have continous integers, e.g., MO = 1:17 ,not 1:16 and 18
+dat3$MOGri <- as.integer(as.factor(dat3$MOGr))
+labsi <- data.frame(MOGrLUi=1:length(unique(dat3$MOGrLU)),
+                    MOGrLU=unique(dat3$MOGrLU))
+dat3$MOGrLUi <- labsi[match(dat3$MOGrLU, labsi$MOGrLU),"MOGrLUi"] 
+labsi <- data.frame(LUi=1:length(unique(dat3$LU)), LU=sort(unique(dat3$LU)))
+dat3$LUi <- labsi[match(dat3$LU, labsi$LU),"LUi"] 
+dat3$lnSOC <- log(dat3[,SOCdepth])
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+
+saveRDS(dat3, fname)
+
+# 3. construct list of data for Stan
+dat <- list(N=length(dat3$lnSOC),
+            lnSOC=dat3$lnSOC,
+            MOi=dat3$MOi,
+            MOGri=dat3$MOGri,
+            MOGrLUi=dat3$MOGrLUi,
+            N_MOi=length(unique(dat3$MOi)),
+            N_MOGri=length(unique(dat3$MOGri)),
+            N_MOGrLUi=length(unique(dat3$MOGrLUi)))
+
+# 4. load libraries, Stan, lme4, etc and user functions ######
+
+library(rstan) # running rstan for the first time requires C++ compiler. 
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores()) # determines parallel processing
+if("lme4" %in% rownames(installed.packages()) == FALSE)
+  {install.packages("lme4")}
+library(lme4)
+
+q97.5 <- function(x) quantile(x,.975)
+q2.5 <- function(x) quantile(x,.025)
+se <- function(x) sqrt(var(x)/length(x))
+multi.fun <- function(x) {
+  c(q2.5 = q2.5(x), mean = mean(x), median = median(x), q97.5 = q97.5(x))
+}
+
+# 5. read in Stan models #####
+fileName <- paste0("model7d no fe informed ", SOCdepth, " v",date,".txt")
+stan_code <- readChar(fileName, file.info(fileName)$size)
+
+# 6. run Stan model and save out as .rds - stan function, model fitting
+a <- Sys.time()
+resStan <- stan(model_code = stan_code, data = dat,
+                chains = 4, iter = 6000, warmup = 500, 
+                thin = 4, verbose = F, cores = 4)
+saveRDS(resStan, file=paste0(fileName,".rds"))
+
+print(resStan, pars=c("Intercept","sigma_MOi","sigma_MOGri"
+                      ,"sigma_MOGrLUi","sigma")) # Rhat should=1
+print(fileName)
+Sys.time()  - a
+```
+
+```{r Manipulate Stan output100, eval=T, cache=T}
+# 7. use stan::extract to stanfit
+rm(list = ls() ) #clear environment
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_100.rds")
+SOCdepth <- paste0("SOCstock",depth)
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+fileName <- paste0("model7d no fe informed ", SOCdepth, " v",date,".txt.rds")
+dat3 <- readRDS(fname)
+modout7d <- readRDS(fileName)
+fitsum <- summary(modout7d,pars=c("sigma_MOi","sigma_MOGri",
+                                  "sigma_MOGrLUi","sigma"))
+fitsumtable <- as.data.frame(fitsum$summary)
+fitsumtable$percentvar <- fitsumtable$mean^2/sum(fitsumtable$mean^2)*100
+fitsumtable$cumpercvar <- rev(cumsum(rev(fitsumtable$percentvar)))
+
+fname2 <-paste0("fitsumtable sigmas ",SOCdepth, " v",date,".rds") 
+saveRDS(fitsumtable,file=fname2)
+
+fit_ss7d <- rstan::extract(modout7d, permuted=T)
+dMO <- dim(fit_ss7d$vary_MOi)[2]
+dMOGr <- dim(fit_ss7d$vary_MOGri)[2]
+dMOGrLU <- dim(fit_ss7d$vary_MOGrLUi)[2]
+dn <- dim(fit_ss7d$vary_MOi)[1]
+# 8. combine parameter samples in linear combinations for LUGR
+
+MOGrLUt <- aggregate(lnSOC~MOi+MOGri+MOGrLUi, data=dat3,length)
+MOGrt <- aggregate(lnSOC~MOi+MOGri, data=MOGrLUt,length)
+MOt <- aggregate(lnSOC~MOi, data=MOGrLUt,length)
+vary_MOGri <- vector()
+for(i in 1:dMOGr){
+  ff <- rep(fit_ss7d$vary_MOGri[,i],MOGrt[i,3]) 
+  vary_MOGri <- c(vary_MOGri,ff)
+  }
+ff <- NULL
+vary_MOi <- vector()
+for(i in 1:dMO){
+  ff <- rep(fit_ss7d$vary_MOi[,i],MOt[i,2]) 
+  vary_MOi <- c(vary_MOi,ff)
+}
+
+MOGrLU7d <- as.vector(fit_ss7d$vary_MOGrLUi[,]) + vary_MOGri + 
+  + vary_MOi + rep(as.vector(fit_ss7d$Intercept),dMOGrLU) 
+MOGrLUi=rep(MOGrLUt$MOGrLUi,each=dn)
+MOGrLU7ddf <- data.frame(MOGrLUi,MOGrLU7d)
+MOGrLU7ddf$MOi <- MOGrLUt[match(MOGrLU7ddf$MOGrLUi,MOGrLUt$MOGrLUi),"MOi"]
+MOGrLU7ddf$MOGri <- MOGrLUt[match(MOGrLU7ddf$MOGrLUi,MOGrLUt$MOGrLUi),"MOGri"]
+MOGrLU7ddf$MOGrLU <- dat3[match(MOGrLU7ddf$MOGrLUi,dat3$MOGrLUi),"MOGrLU"]
+#need to add MOGrLU to MOGrLU7ddf to match with pixel count df
+MOGrLU7ddf$realiz <- rep(1:dn,dMOGrLU)
+fname3 <-paste0("nonStan model MOGrLU 7d dataframe ",SOCdepth, " v",date,".rds")
+saveRDS(MOGrLU7ddf, fname3)
+mogr7ddf <- aggregate(MOGrLU7d~MOGri+realiz,data=MOGrLU7ddf,mean)
+
+fname3 <-paste0("nonStan model MOGr 7d dataframe ",SOCdepth, " v",date,".rds") 
+saveRDS(mogr7ddf, file=fname3)
+```
+
+```{r partitioning of variance100, cache=T, eval=T}
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_100.rds")
+SOCdepth <- paste0("SOCstock",depth)
+fname2 <-paste0("fitsumtable sigmas ",SOCdepth, " v",date,".rds") 
+fitsumtable  <- readRDS(fname2)
+
+kk <- knitr::kable(fitsumtable[,c(1,3:4,6,8,9:12)],
+                   digits = c(rep(3,5),0,2,1,1),
+             col.names = c("mean","sd","2.5%","50%","97.5%",
+                           "n_eff","Rhat","% variance","cumulative % variance"))
+fname3 <-paste0("fitsumtable sigmas kable",SOCdepth, " v",date,".rds") 
+saveRDS(kk, fname3 )
+
+```
+
+```{r Area aggrgation stats100, cache=T, eval=T}
+
+# 10 load gSSURGO pixel counts
+date <- "2017-04-10"
+depth <- readRDS("depth_selection_100.rds")
+SOCdepth <- paste0("SOCstock",depth)
+LUGRpix <- read.csv("LUGR_pixelcount30m_label.csv",header=T)
+
+# table(substr(as.character(unique(LUGRpix$LUGR[nchar(as.character(LUGRpix$LUGR))==5])),1,1))
+LUGRpix$MOGRLU <- ifelse(nchar(as.character(LUGRpix$LUGR))==5,
+paste0(substr(LUGRpix$LUGR, 2,5),substr(LUGRpix$LUGR,1,1)),"NA")
+
+fname3 <-paste0("nonStan model MOGrLU 7d dataframe ",SOCdepth, " v",date,".rds")
+pMOGrLUall <- readRDS(file=fname3)
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+dat3 <- readRDS(fname)
+pMOGrLUall$MOGrLU <- dat3[match(pMOGrLUall$MOGrLUi,dat3$MOGrLUi),"MOGrLU"]
+pMOGrLUall <- pMOGrLUall[!grepl(pattern="X",x=pMOGrLUall$MOGrLU),] # removel CRP
+pMOGrLUall$pixelcount <- LUGRpix[match(pMOGrLUall$MOGrLU,LUGRpix$MOGRLU),"Count"]
+pMOGrLUall2 <- pMOGrLUall[is.na(pMOGrLUall$pixelcount),] # checking for missing LUGR
+# table(droplevels(pMOGrLUall2$MOGrLU))
+pMOGrLUall$haperpixel <- 900/10000 # 30*30m grid
+
+# 11 calculate area weighted stocks
+pMOGrLUall$LUGrha <- pMOGrLUall$pixelcount*pMOGrLUall$haperpixel
+pMOGrLUall$MgCpLUGR <- pMOGrLUall$LUGrha*exp(pMOGrLUall$MOGrLU7d)
+# functions for stats
+q97.5 <- function(x) quantile(x,.975)
+q2.5 <- function(x) quantile(x,.025)
+se <- function(x) sqrt(var(x)/length(x))
+multi.fun <- function(x) {
+  c(q2.5 = q2.5(x), mean = mean(x), median = median(x), q97.5 = q97.5(x), sd=sd(x))
+}
+
+# 12 output summary stats for mapping ####
+LUGrMgCstats <-aggregate(MgCpLUGR~MOGrLU,data=pMOGrLUall,multi.fun) # these intervals are of no value
+fname2 <- paste0("LUGr MgC ",SOCdepth, " v",date,".rds") 
+saveRDS(LUGrMgCstats,file=fname2)
+
+pMOGrLUall$LUGRMgCha <- pMOGrLUall$MgCpLUGR/pMOGrLUall$LUGrha
+LUGrMgChastats <-aggregate(LUGRMgCha~MOGrLU,data=pMOGrLUall,multi.fun) 
+# these intervals are meaningless
+LUGrMgChastats$LUGR <- paste0(substr(as.character(LUGrMgChastats$MOGrLU),
+5,5),substr(as.character(LUGrMgChastats$MOGrLU), 1,4))
+fname4 <- paste0("LUGr stocks ",SOCdepth, " v",date,".rds") 
+saveRDS(LUGrMgChastats,file=fname4)
+fname5 <- paste0("LUGr stocks ",SOCdepth, " v",date,".csv")
+write.csv(LUGrMgChastats,fname5, row.names = F)
+
+# print(paste(round(sum(LUGrMgCstats$MgCpLUGR[,3])/1e9,2),
+#             "PG C in surface 100cm of CONUS as calculated from summing min, mean, and max of LUGR totals, 
+#             not appropriate as a CONUS esimate",
+#       "LCI/UCI",round(sum(LUGrMgCstats$MgCpLUGR[,1])/1e9,2),
+#       round(sum(LUGrMgCstats$MgCpLUGR[,4])/1e9,2),
+#       ". Most similar calculation method to Guo et al 2006"))
+
+CONUSMgCtemp <-aggregate(MgCpLUGR~realiz,data=pMOGrLUall,sum) 
+CONUSMgCstats <-multi.fun(CONUSMgCtemp$MgCpLUGR) 
+fname6 <- paste0("CONUSMgCstats ",SOCdepth, " v",date,".rds")
+saveRDS(CONUSMgCstats, file=fname6)
+# print(paste(round(CONUSMgCstats[2]/1e9,1),
+#             "PG C in surface 100cm of CONUS as calculated from summing LUGR totals",
+#             "LCI/UCI",
+#             round(CONUSMgCstats[1]/1e9,1),
+#             round(CONUSMgCstats[4]/1e9,1), 
+#             ". This takes full advantage of the RaCA experimental design."))
+
+```
+
+End 100cm loop
+
+##### RaCA - Total Stocks Start for all depths
+
+```{r big picture table 1, fig.width=3.25, fig.height=3.25, eval=T}
+# table of PgC for CONUS at 5, 30, 100 cm with 95% CI, 
+# sample numbers, total land area coverage, % of terrrestrial CONUS
+rm(list=ls())
+# import 
+CONUS100 <- readRDS("CONUSMgCstats SOCstock100 v2017-04-10.rds")
+CONUS30 <- readRDS("CONUSMgCstats SOCstock30 v2017-04-10.rds")
+CONUS5 <- readRDS("CONUSMgCstats SOCstock5 v2017-04-10.rds")
+CONUSstat <- data.frame(rbind(CONUS5,CONUS30, CONUS100))
+CONUSstat <- CONUSstat/1e9
+row.names(CONUSstat) <- c("5 cm","30 cm","100 cm")
+knitr::kable(CONUSstat[,1:4],digits = 1, format="pandoc",
+             col.names = c("lower CI","geometric mean","median","upper CI"),
+             caption = "Table S7. SOC (PgC) for CONUS in the surface 5,
+             30, and 100cm of soil depth")
+
+```
+
+##### Where is the SOC stored?
+###### Landuse
+
+```{r landuse and regional stats, eval=T}
+# RaCA area only i.e., SSURGO coverage only
+rm(list=ls())
+##### 5cm of soil depth
+date <- "2017-04-10"
+depthlocal <- 5
+SOCdepth <- paste0("SOCstock",depthlocal)
+LUGRpix <- read.csv("LUGR_pixelcount30m_label.csv",header=T)
+
+LUGRpix$MOGRLU <- ifelse(nchar(as.character(LUGRpix$LUGR))==5,
+                         paste0(substr(LUGRpix$LUGR,
+                                       2,5),substr(LUGRpix$LUGR,1,1)),"NA")
+
+LUGR <- as.character(LUGRpix$LUGR)
+LUGRpix$MOGrLU <- paste0(substr(LUGR,2,5),substr(LUGR,1,1))
+fname3 <-paste0("nonStan model MOGrLU 7d dataframe ",SOCdepth, " v",date,".rds")
+pMOGrLUall <- readRDS(file=fname3)
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+dat3 <- readRDS(fname)
+pMOGrLUall$MOGrLU <- dat3[match(pMOGrLUall$MOGrLUi,dat3$MOGrLUi),"MOGrLU"]
+pMOGrLUall <- pMOGrLUall[!grepl(pattern="X",x=pMOGrLUall$MOGrLU),] # removel CRP
+pMOGrLUall$pixelcount <- LUGRpix[match(pMOGrLUall$MOGrLU,LUGRpix$MOGRLU),"Count"]
+pMOGrLUall2 <- pMOGrLUall[is.na(pMOGrLUall$pixelcount),] # checked for missing LUGR
+
+
+pMOGrLUall$haperpixel <- 900/10000 # 30*30m grid
+# 11 calculate area weighted stocks
+q97.5 <- function(x) quantile(x,.975)
+q2.5 <- function(x) quantile(x,.025)
+se <- function(x) sqrt(var(x)/length(x))
+multi.fun <- function(x) {
+ c(q2.5 = q2.5(x), mean = mean(x), median = median(x), q97.5 = q97.5(x))
+  
+}
+
+pMOGrLUall$LUGrha <- pMOGrLUall$pixelcount*pMOGrLUall$haperpixel
+pMOGrLUall$MgCpLUGR <- pMOGrLUall$LUGrha*exp(pMOGrLUall$MOGrLU7d)
+pMOGrLUall$LU <- substr(pMOGrLUall$MOGrLU,5,5)
+LUaggsum <- aggregate(cbind(MgCpLUGR,LUGrha)~LU+realiz, data=pMOGrLUall,sum)
+LUaggsum$MgChaLU <- LUaggsum$MgCpLUGR/LUaggsum$LUGrha
+LUstats5 <- aggregate(cbind(MgCpLUGR, MgChaLU, LUGrha)~LU, data=LUaggsum, multi.fun)
+
+pMOGrLUall$MO <- substr(pMOGrLUall$MOGrLU,1,2)
+MOaggsum <- aggregate(cbind(MgCpLUGR,LUGrha)~MO+realiz, data=pMOGrLUall,sum)
+MOaggsum$MgChaLU <- MOaggsum$MgCpLUGR/MOaggsum$LUGrha
+MOstats5 <- aggregate(cbind(MgCpLUGR, MgChaLU, LUGrha)~MO, data=MOaggsum, multi.fun)
+# conservative credible interval for gap filling in each MO  5 cm----
+conservMOstats <- aggregate(cbind(MgCpLUGR,LUGrha)~MOGrLU+MO,
+                            data=pMOGrLUall,multi.fun)
+dfconservMOstats <- data.frame(MOGrLU= conservMOstats$MOGrLU,
+                               MO=conservMOstats$MO,
+                               MgCpLUGR.lci=conservMOstats$MgCpLUGR[,1],
+                               MgCpLUGR.ave=conservMOstats$MgCpLUGR[,2],
+MgCpLUGR.med=conservMOstats$MgCpLUGR[,3],
+MgCpLUGR.uci=conservMOstats$MgCpLUGR[,4],
+LUGrha=conservMOstats$LUGrha[,1])
+conserMOsum <- aggregate(cbind(MgCpLUGR.lci, MgCpLUGR.ave, 
+                               MgCpLUGR.uci, LUGrha)~MO, 
+                         data=dfconservMOstats , sum)
+conserMOsum$MgCha.lci <- conserMOsum$MgCpLUGR.lci/conserMOsum$LUGrha
+conserMOsum$MgCha.ave <- conserMOsum$MgCpLUGR.ave/conserMOsum$LUGrha
+conserMOsum$MgCha.uci <- conserMOsum$MgCpLUGR.uci/conserMOsum$LUGrha
+fname7 <- paste0("ConservMO_gap_filling_SOC_",SOCdepth, "_v", date, ".rds")
+saveRDS(conserMOsum,fname7)
+##################### 30 cm of depth stats
+# date <- "2017-04-10"
+depthlocal <- 30
+SOCdepth <- paste0("SOCstock",depthlocal)
+fname3 <-paste0("nonStan model MOGrLU 7d dataframe ",
+                SOCdepth, " v",date,".rds")
+pMOGrLUall <- readRDS(file=fname3)
+fname <- paste0("data for Stan models ",
+                SOCdepth, " v", date, ".rds")
+dat3 <- readRDS(fname)
+pMOGrLUall$MOGrLU <- dat3[match(pMOGrLUall$MOGrLUi,dat3$MOGrLUi),"MOGrLU"]
+pMOGrLUall <- pMOGrLUall[!grepl(pattern="X",x=pMOGrLUall$MOGrLU),] # removel CRP
+pMOGrLUall$pixelcount <- LUGRpix[match(pMOGrLUall$MOGrLU,LUGRpix$MOGRLU),"Count"]
+pMOGrLUall2 <- pMOGrLUall[is.na(pMOGrLUall$pixelcount),] 
+
+pMOGrLUall$haperpixel <- 900/10000 # 30*30m grid
+
+pMOGrLUall$LUGrha <- pMOGrLUall$pixelcount*pMOGrLUall$haperpixel
+pMOGrLUall$MgCpLUGR <- pMOGrLUall$LUGrha*exp(pMOGrLUall$MOGrLU7d)
+pMOGrLUall$LU <- substr(pMOGrLUall$MOGrLU,5,5)
+LUaggsum <- aggregate(cbind(MgCpLUGR,LUGrha)~LU+realiz, data=pMOGrLUall,sum)
+LUaggsum$MgChaLU <- LUaggsum$MgCpLUGR/LUaggsum$LUGrha
+LUstats30 <- aggregate(cbind(MgCpLUGR, MgChaLU, LUGrha)~LU, data=LUaggsum, multi.fun)
+
+pMOGrLUall$MO <- substr(pMOGrLUall$MOGrLU,1,2)
+MOaggsum <- aggregate(cbind(MgCpLUGR,LUGrha)~MO+realiz, data=pMOGrLUall,sum)
+MOaggsum$MgChaLU <- MOaggsum$MgCpLUGR/MOaggsum$LUGrha
+MOstats30 <- aggregate(cbind(MgCpLUGR, MgChaLU, LUGrha)~MO, data=MOaggsum, multi.fun)
+# conservative credible interval for gap filling in each MO 30cm ----------------
+conservMOstats <- aggregate(cbind(MgCpLUGR,LUGrha)~MOGrLU+MO,
+                            data=pMOGrLUall,multi.fun)
+dfconservMOstats <- data.frame(MOGrLU= conservMOstats$MOGrLU,
+                               MO=conservMOstats$MO, MgCpLUGR.lci=conservMOstats$MgCpLUGR[,1],
+                               MgCpLUGR.ave=conservMOstats$MgCpLUGR[,2],
+                               MgCpLUGR.med=conservMOstats$MgCpLUGR[,3],
+                               MgCpLUGR.uci=conservMOstats$MgCpLUGR[,4],
+                               LUGrha=conservMOstats$LUGrha[,1])
+conserMOsum <- aggregate(cbind(MgCpLUGR.lci, MgCpLUGR.ave, 
+                               MgCpLUGR.uci, LUGrha)~MO, 
+                         data=dfconservMOstats , sum)
+conserMOsum$MgCha.lci <- conserMOsum$MgCpLUGR.lci/conserMOsum$LUGrha
+conserMOsum$MgCha.ave <- conserMOsum$MgCpLUGR.ave/conserMOsum$LUGrha
+conserMOsum$MgCha.uci <- conserMOsum$MgCpLUGR.uci/conserMOsum$LUGrha
+fname7 <- paste0("ConservMO_gap_filling_SOC_",SOCdepth, "_v", date, ".rds")
+saveRDS(conserMOsum,fname7)
+######################## 100 cm of depth
+date <- "2017-04-10"
+depthlocal <- 100
+SOCdepth <- paste0("SOCstock",depthlocal)
+
+fname3 <-paste0("nonStan model MOGrLU 7d dataframe ",SOCdepth, " v",date,".rds")
+pMOGrLUall <- readRDS(file=fname3)
+fname <- paste0("data for Stan models ",SOCdepth, " v", date, ".rds")
+dat3 <- readRDS(fname)
+pMOGrLUall$MOGrLU <- dat3[match(pMOGrLUall$MOGrLUi,dat3$MOGrLUi),"MOGrLU"]
+pMOGrLUall <- pMOGrLUall[!grepl(pattern="X",x=pMOGrLUall$MOGrLU),] # removel CRP
+pMOGrLUall$pixelcount <- LUGRpix[match(pMOGrLUall$MOGrLU,LUGRpix$MOGRLU),"Count"]
+pMOGrLUall2 <- pMOGrLUall[is.na(pMOGrLUall$pixelcount),] # checking for missing LUGR
+## table(droplevels(pMOGrLUall2$MOGrLU))
+
+pMOGrLUall$haperpixel <- 900/10000 # 30*30m grid
+
+pMOGrLUall$LUGrha <- pMOGrLUall$pixelcount*pMOGrLUall$haperpixel
+pMOGrLUall$MgCpLUGR <- pMOGrLUall$LUGrha*exp(pMOGrLUall$MOGrLU7d)
+pMOGrLUall$LU <- substr(pMOGrLUall$MOGrLU,5,5)
+LUaggsum <- aggregate(cbind(MgCpLUGR,LUGrha)~LU+realiz, data=pMOGrLUall,sum)
+LUaggsum$MgChaLU <- LUaggsum$MgCpLUGR/LUaggsum$LUGrha
+LUstats100 <- aggregate(cbind(MgCpLUGR, MgChaLU, LUGrha)~LU, data=LUaggsum, multi.fun)
+
+pMOGrLUall$MO <- substr(pMOGrLUall$MOGrLU,1,2)
+MOaggsum <- aggregate(cbind(MgCpLUGR,LUGrha)~MO+realiz, data=pMOGrLUall,sum)
+MOaggsum$MgChaLU <- MOaggsum$MgCpLUGR/MOaggsum$LUGrha
+MOstats100 <- aggregate(cbind(MgCpLUGR, MgChaLU, LUGrha)~MO, 
+                        data=MOaggsum, multi.fun)
+
+# conservative credible interval for gap filling in each MO 100cm----------------
+conservMOstats <- aggregate(cbind(MgCpLUGR,LUGrha)~MOGrLU+MO, data=pMOGrLUall,multi.fun)
+dfconservMOstats <- data.frame(MOGrLU= conservMOstats$MOGrLU,
+                               MO=conservMOstats$MO,
+                               MgCpLUGR.lci=conservMOstats$MgCpLUGR[,1],
+                               MgCpLUGR.ave=conservMOstats$MgCpLUGR[,2],
+                               MgCpLUGR.med=conservMOstats$MgCpLUGR[,3],
+                               MgCpLUGR.uci=conservMOstats$MgCpLUGR[,4],
+                               LUGrha=conservMOstats$LUGrha[,1])
+conserMOsum <- aggregate(cbind(MgCpLUGR.lci, MgCpLUGR.ave, 
+                               MgCpLUGR.uci, LUGrha)~MO, 
+                         data=dfconservMOstats , sum)
+conserMOsum$MgCha.lci <- conserMOsum$MgCpLUGR.lci/conserMOsum$LUGrha
+conserMOsum$MgCha.ave <- conserMOsum$MgCpLUGR.ave/conserMOsum$LUGrha
+conserMOsum$MgCha.uci <- conserMOsum$MgCpLUGR.uci/conserMOsum$LUGrha
+fname7 <- paste0("ConservMO_gap_filling_SOC_",SOCdepth, "_v", date, ".rds")
+saveRDS(conserMOsum,fname7)
+
+LUstats <- rbind(LUstats5,LUstats30,LUstats100 )
+soildepthl <- c("5 cm","","","","","30 cm","","","","","100 cm","","","","")
+LUstatstable <- data.frame(Depth=soildepthl,LU=LUstats$LU, km2=LUstats$LUGrha[,3]/100,
+                           Pool_lci=LUstats$MgCpLUGR[,1]/1e9,
+                           #Pool_mean=LUstats$MgCpLUGR[,2]/1e9,
+                           Pool_med=LUstats$MgCpLUGR[,3]/1e9,
+                           Pool_uci=LUstats$MgCpLUGR[,4]/1e9,
+                           Stock_lci=LUstats$MgChaLU[,1],
+                           Stock_mean=LUstats$MgChaLU[,2],
+                           #Stock_med=LUstats$MgChaLU[,3],
+                           Stock_uci=LUstats$MgChaLU[,4],
+perc_of_CONUS=c(LUstats$MgCpLUGR[1:5,3]/sum(LUstats$MgCpLUGR[1:5,3])*100,
+LUstats$MgCpLUGR[6:10,3]/sum(LUstats$MgCpLUGR[6:10,3])*100,
+LUstats$MgCpLUGR[11:15,3]/sum(LUstats$MgCpLUGR[11:15,3])*100))
+knitr::kable(LUstatstable,digits = c(0,0,0,rep(1,6)), 
+             caption = "Table S8. Landuse influence on the Total SOC pools 
+             (Pg C) and stocks (Mg C ha-1) of CONUS for the surface 5, 30, and
+             100 cm of soil.  Upper and lower credible intervals are indicated
+             by the uci and lci abbreviations.")
+write.csv(LUstatstable, "Landuse_pools_stocks_areas_alldepths.csv")
+write.csv(MOstats5,"Regional stats for mapping 5cm v20170727.csv",row.names = F)
+write.csv(MOstats30,"Regional stats for mapping 30cm v20170727.csv",row.names = F)
+write.csv(MOstats100,"Regional stats for mapping 100cm v20170727.csv",row.names = F)
+MOstats <- rbind(MOstats5,MOstats30,MOstats100 )
+MOstats$soildepthl <- c(rep("5cm",17),rep("30cm",17),rep("100cm",17))
+saveRDS(MOstats, "RaCA_regional_totals.rds")
+soildepthl <- c("5 cm",rep("",16),"30 cm",rep("",16),"100 cm",rep("",16))
+MOstatstable <- data.frame(Depth=soildepthl,MO=MOstats$MO,
+                           km2=MOstats$LUGrha[,3]/100,
+                           Pool_lci=MOstats$MgCpLUGR[,1]/1e9,
+                           #Pool_mean=MOstats$MgCpLUGR[,2]/1e9,
+                           Pool_med=MOstats$MgCpLUGR[,3]/1e9,
+                           Pool_uci=MOstats$MgCpLUGR[,4]/1e9,
+                           Stock_lci=MOstats$MgChaLU[,1],
+                           Stock_mean=MOstats$MgChaLU[,2],
+                           #Stock_med=MOstats$MgChaLU[,3],
+                           Stock_uci=MOstats$MgChaLU[,4],
+                           perc_of_CONUS=c(MOstats$MgCpLUGR[1:17,3]/sum(MOstats$MgCpLUGR[1:17,3])*100,
+                                           MOstats$MgCpLUGR[18:34,3]/sum(MOstats$MgCpLUGR[18:34,3])*100,
+                                           MOstats$MgCpLUGR[35:51,3]/sum(MOstats$MgCpLUGR[35:51,3])*100))
+
+knitr::kable(MOstatstable,
+             digits = c(0,0,0,rep(2,3),rep(1,3)), 
+             caption = "Table S9. Regional variation in the Total SOC pools
+             (Pg C) and stocks (Mg C ha-1) of CONUS for the surface 5, 30, 
+             and 100 cm of soil.  Upper and lower credible intervals are
+             indicated by the uci and lci abbreviations.")
+```
+
+
+#### Fig. S11. RaCA land area coverage by Region
+
+
+```{r RaCA land area coverage, eval=T, fig.cap=" S11.  RaCA land area coverage for each Region"}
+rm(list=ls())
+MOstats <- readRDS("RaCA_regional_totals.rds")
+LUGRpix <- read.csv("LUGR_pixelcount30m_label.csv",header=T)
+LUGRpix$Region2 <- as.numeric(as.character(LUGRpix$Region))
+LUGRpixwodev <- LUGRpix[LUGRpix$LU!="d",]
+aggMO <- aggregate(Count~Region2, data=LUGRpixwodev, sum)
+MOstats$totalMOha <- aggMO$Count*(9e-2) # convert pixels to ha
+# import conversative estimates of lci, mean, and uci for each MO
+conservMO5 <- readRDS("ConservMO_gap_filling_SOC_SOCstock5_v2017-04-10.rds")
+conservMO30 <- readRDS("ConservMO_gap_filling_SOC_SOCstock30_v2017-04-10.rds")
+conservMO100 <- readRDS("ConservMO_gap_filling_SOC_SOCstock100_v2017-04-10.rds")
+conservMO <- data.frame(depth=c(rep(5,17),rep(30,17),rep(100,17)),
+                        rbind(conservMO5, conservMO30, conservMO100))
+conservMO$totalMOha <- aggMO$Count*(9e-2)
+conservMO$missingha <- (conservMO$totalMOha-conservMO$LUGrha)
+conservMO$missingMgC.lci <- conservMO$MgCha.lci*conservMO$missingha
+conservMO$missingMgC.ave <- conservMO$MgCha.ave*conservMO$missingha
+conservMO$missingMgC.uci <- conservMO$MgCha.uci*conservMO$missingha
+conservMO$percmissha <- conservMO$missingha/conservMO$totalMOha*100
+conservMO$percRaCA <- 100-conservMO$percmissha
+percCONUS <- sum(conservMO$missingha)/sum(conservMO$totalMOha)*100
+barchart(conservMO$percRaCA~conservMO$MO, 
+         ylab="% of Region covered by RaCA", 
+         ylim=c(0,100), xlab="Region")
+
+```
+
+
+
+#### Fig. S12. Comparison RaCA CONUS SOC estimates (100cm) with previous estimates including RaCA with gap filling to non-RaCA areas.
+
+RaCA covers all but `r round(percCONUS,1)`% of CONUS (Figure S11). We estimated the SOC stocks in the areas of CONUS not covered by RaCA (hereafter non-RaCA) on a regional (i.e., MO) basis by assuming non-RaCA areas within regions contain the same mean SOC stocks as RaCA areas within regions.  We used a conservative approach to estimate the non-RaCA upper and lower limits on SOC stocks similar to Guo et al. [-@Guo2006].  The lower, mean, and upper SOC stock limits were extrapolated similar to the RaCA areas (above) and added to the respective RaCA SOC pools.
+
+```{r Regional compare, eval=T, fig.cap = " S12. Comparison RaCA CONUS SOC estimates (100cm) with previous estimates including RaCA with gap filling to non-RaCA areas.  Guo-2006 and Kern-1994, represent previous CONUS estimates and  RaCA is from this study and RaCA+gaps includes non-RaCA areas."  }
+# import RaCA only CONUS SOC pools --------------------------
+RaCACONUS5 <- readRDS("CONUSMgCstats SOCstock5 v2017-04-10.rds")
+df5 <- data.frame(study=c("Kern","Guo","RaCA","RaCA+gaps"),
+                  PgC.ave=c(80.4,68,as.numeric(RaCACONUS5[2])/
+                              1e9,(as.numeric(RaCACONUS5[2]) +
+sum(conservMO$missingMgC.ave[conservMO$depth==5]))/1e9),
+                  PgC.lci=c(20.4,8,as.numeric(RaCACONUS5[1])/1e9,
+                            (as.numeric(RaCACONUS5[1]) +
+sum(conservMO$missingMgC.lci[conservMO$depth==5]))/1e9),
+                  PgC.uci=c(120.4,128,as.numeric(RaCACONUS5[4])/1e9,
+                            (as.numeric(RaCACONUS5[4]) +
+sum(conservMO$missingMgC.uci[conservMO$depth==5]))/1e9) )
+
+RaCACONUS30 <- readRDS("CONUSMgCstats SOCstock30 v2017-04-10.rds")
+df30 <- data.frame(study=c("Kern","Guo","RaCA","RaCA+gaps"),
+                   PgC.ave=c(80.4,68,as.numeric(RaCACONUS30[2])/1e9,
+(as.numeric(RaCACONUS30[2])
+ +sum(conservMO$missingMgC.ave[conservMO$depth==30]))/1e9),
+                   PgC.lci=c(20.4,8,as.numeric(RaCACONUS30[1])/1e9,
+                             (as.numeric(RaCACONUS30[1]) +
+sum(conservMO$missingMgC.lci[conservMO$depth==30]))/1e9),
+                   PgC.uci=c(120.4,128,as.numeric(RaCACONUS30[4])/1e9,
+                             (as.numeric(RaCACONUS30[4]) +
+sum(conservMO$missingMgC.uci[conservMO$depth==30]))/1e9) )
+
+RaCACONUS100 <- readRDS("CONUSMgCstats SOCstock100 v2017-04-10.rds")
+
+df100 <- data.frame(study=c("Kern-1994","Guo-2006","RaCA","RaCA+gaps"),
+                    PgC.ave=c(80.7,63.9,as.numeric(RaCACONUS100[2])/1e9,
+                                                                                  (as.numeric(RaCACONUS100[2]) + sum(conservMO$missingMgC.ave[conservMO$depth==100]))/1e9), PgC.lci=c(7.9,25.4,
+as.numeric(RaCACONUS100[1])/1e9,
+(as.numeric(RaCACONUS100[1]) +
+   sum(conservMO$missingMgC.lci[conservMO$depth==100]))/1e9),
+                    PgC.uci=c(153.6,113.2,
+                              as.numeric(RaCACONUS100[4])/1e9,
+                              (as.numeric(RaCACONUS100[4]) +
+sum(conservMO$missingMgC.uci[conservMO$depth==100]))/1e9) )
+
+
+f <- ggplot(data=df100, aes(y=PgC.ave, x=study))+
+  geom_bar(stat="identity",position = "dodge") +
+  geom_errorbar(ymax=df100$PgC.uci, ymin=df100$PgC.lci, width=.5) +
+  scale_y_continuous(limits = c(0,175)) +
+  theme_classic() +
+  labs(y="CONUS SOC Pool (Pg C - 100cm)", x="Study")
+# plot figures
+f
+ggsave(filename = "CONUS_SOC_100cm_comparisons.png",
+       device = "png",plot = f,width = 2.25,height = 2.25,units = "in")
+
+ggsave(filename = "CONUS_SOC_100cm_comparisons.eps",
+       device = "eps",plot = f,width = 2.25,height = 2.25,units = "in")
+```
+
+
+## Variance partitioning across sampling design
+
+```{r part of variance all depths, eval=T}
+rm(list=ls())
+fitsumtable5  <- readRDS("fitsumtable sigmas SOCstock5 v2017-04-10.rds")
+fitsumtable30  <- readRDS("fitsumtable sigmas SOCstock30 v2017-04-10.rds")
+fitsumtable100  <- readRDS("fitsumtable sigmas SOCstock100 v2017-04-10.rds")
+soildepthl <- c("5 cm","","","","30 cm","","","","100 cm","","","")
+sigmas <- data.frame(soildepth=soildepthl, Levels=rep(c("Regions","Soil Group",
+"Landuse","Inter-Site"),3),rbind(fitsumtable5, fitsumtable30, fitsumtable100))
+sigmas2 <- sigmas[,c("soildepth","Levels", "X2.5.", "X50.",
+                     "X97.5.", "n_eff", "Rhat","percentvar", "cumpercvar")]
+cnames <- c("Soil depth","Levels","2.5%","50%","97.5%",
+            "n_eff","Rhat","% variance","cumulative % variance")
+signfd <- c(0,0,rep(3,3),0,2,1,1)
+knitr::kable(sigmas2,digits = signfd, col.names =cnames,
+caption = "Table S10. Partitioning of variance amoung RaCA sampling design levels in the surface 5, 30, and 100 cm of soil across CONUS.",
+             row.names =F, padding= 2)
+```
+
+The use of the hierarchical sampling design to aggregate similar soils into soil groups was most effective (i.e., more the variance was captured in the Soil Group level, Table) at 100 cm of depth, intermediate at 30 cm, and least effective for the surface soils.  This was expected as the sampling design was constructed using former estimates to 100cm of depth [@Wills2013].
+
+
+
+### Graphs and Maps updated with data from hierarchical bayesian analysis
+Previous maps with general weighted means were updated.  Maps use a common color scheme to allow comparisons across depths, intervals and aggregation method.
+
+#### Fig. S13. Updated Stacked bar chart by Land Use - Land Cover Class with credible invervals
+```{r stackplot2, eval=T, out.width="100%"}
+
+#This section using an alternate scripting style with dplyr, tidyr and magrittr piping
+# list.of.packages
+detach(name=package:plyr, TRUE) #remove prior package to eliminate conflicts
+
+#this section uses
+library(dplyr)
+library(tidyr)
+
+#if not already loaded
+LUstatstable <- read.csv("Landuse_pools_stocks_areas_alldepths.csv")
+
+#add depth labels and rearrange
+
+hb_LU <- LUstatstable %>%
+  select(LU, Stock_mean) %>%
+  mutate(Depth = ifelse(row_number() %in% seq(1,5,1), "SOCstock5",
+                         ifelse(row_number() %in% seq(6,10,1), "SOCstock30",
+                                "SOCstock100")))  %>%
+  spread(Depth, Stock_mean) 
+
+#create factors for stacked bar plots
+hb_LU$zero_to_stock5 <- hb_LU$SOCstock5
+hb_LU$five_to_stock30 <- hb_LU$SOCstock30-hb_LU$SOCstock5
+hb_LU$thirty_to_stock100 <- hb_LU$SOCstock100- hb_LU$SOCstock30
+
+
+#organize depth increment and land use means
+td <-  hb_LU %>%
+      select(LU, zero_to_stock5, five_to_stock30, thirty_to_stock100) %>%
+          gather(Depth, SOCstock, zero_to_stock5, five_to_stock30,
+                 thirty_to_stock100) %>%
+      mutate(SOC = SOCstock, ID = paste(LU,  str_sub(Depth, -3, -1), sep ="_"))
+
+
+#organize upper and lower credible intervals
+
+ti <- LUstatstable %>%
+  select(LU, Stock_lci, Stock_uci) %>%
+  mutate(Depth = ifelse(row_number() %in% seq(1,5,1), "SOCstock5",
+                         ifelse(row_number() %in% seq(6,10,1), "SOCstock30", "SOCstock100")),     
+         ID = paste(LU,  str_sub(Depth, -3, -1), sep ="_")) %>%
+  select(ID, Stock_lci, Stock_uci)
+
+
+ t <- inner_join(td,ti, by = "ID")
+
+# Order and relabel factor levels
+ 
+#levels(t$LU)
+t$LU <- as.factor(t$LU)
+t$LU <- factor(t$LU, levels(t$LU)[c(5,2,3,4,1,6)])
+#levels(t$LU)
+levels(t$LU)<- c('Wetland', 'Forestland', 'Pastureland',
+                 "Rangeland", 'Cropland', 'CRP')
+
+ 
+t$Depth <-  as.factor(t$Depth)
+t$Depth <- factor(t$Depth, levels(t$Depth)[c(3,1,2)])  #reorder factor levels
+#levels(t$Depth)
+levels(t$Depth) = c("0 to 5 cm","5 to 30 cm","30 to 100 cm") #relabel levels
+#levels(t$LU)
+
+
+de <- ggplot(t, aes(LU, SOC)) + 
+  geom_col(aes(fill=factor(Depth, levels = rev(levels(Depth))))) + scale_y_reverse() +  
+  scale_fill_discrete(guide=guide_legend(reverse=T)) + 
+  geom_errorbar(aes(ymax=Stock_uci , ymin= Stock_lci),
+                width = 0.08, color = "black", size = 0.1) + 
+  ggtitle("SOC stocks by Depth Increment") + 
+  labs(x ="Land Use - Land Cover Class", 
+y=expression(paste("SOC stock (Mg ha"^-1,")")), fill = "Depth Increment") + 
+  theme(axis.text.y=element_text(size=12),
+        axis.text.x=element_text(size=10),
+        legend.text=element_text(size=10)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+de
+
+#save graph
+# ggsave('STACK_w_CredI.png', plot = de, device="png", scale = 1, width = 6, height = 3, units = "in", dpi = 600, limitsize = TRUE)
+
+rm(t,td,ti, hb_lu, de)
+
+
+```
+
+
+
+#### Fig. S14. Land use - soil group (LUGR) values joined to soil survey pixels for A. Upper Credible Interval, B. Median, and C. Upper Credible Interval values at three depth increments.
+```{r sum_maps2, eval=T, out.width="100%"}
+
+#maps updated with data from hierarchical model
+
+hb5 <- "https://nrcs.box.com/shared/static/uc6ma1t7h7429fy98imdosblqrozx0kl.png"
+if(!file.exists('RaCA_manuscript_LUGR_HB5.png'))
+  download.file(hb5, destfile = 'RaCA_manuscript_LUGR_HB5.png',
+                mode = 'wb')
+knitr::include_graphics('RaCA_manuscript_LUGR_HB5.png', 
+                        auto_pdf = T, dpi = NULL)
+
+hb30 <- "https://nrcs.box.com/shared/static/ivsqq0pffs64eg5yb23fv0v45r4nsd2e.png"
+if(!file.exists('RaCA_manuscript_LUGR_HB30.png'))
+  download.file(hb30, destfile = 'RaCA_manuscript_LUGR_HB30.png',
+                mode = 'wb')
+knitr::include_graphics('RaCA_manuscript_LUGR_HB30.png',
+                        auto_pdf = T, dpi = NULL)
+
+hb100 <- "https://nrcs.box.com/shared/static/1hy8lxd8zhtxdgijmth8wftn7q6q8gi2.png"
+if(!file.exists('RaCA_manuscript_LUGR_HB100.png'))
+  download.file(hb100, destfile = 'RaCA_manuscript_LUGR_HB100.png',
+                mode = 'wb')
+knitr::include_graphics('RaCA_manuscript_LUGR_HB100.png', auto_pdf = T, dpi = NULL)
+
+```
+
+#### Fig. S15.Regional averages derived through hierarhical Bayesian model for three depth increments (0 - 5cm, 0 - 30cm and 0 - 100cm) for: A. Upper Credible Interval, B. Median, and C. Upper Credible Interval values.
+```{r sum_maps3, eval=T, out.width="100%"}
+
+#maps updated with data from hierarchical model
+#Region averages as derived through HB by regional polygon
+
+hbRegion <- "https://nrcs.box.com/shared/static/pbonwgpa4jkv6iek968s9j86fnet3jgt.png"
+if(!file.exists('RaCA_manuscript_Region_HB.png'))
+  download.file(hbRegion, destfile = 'RaCA_manuscript_Region_HB.png',
+                mode = 'wb')
+knitr::include_graphics('RaCA_manuscript_Region_HB.png', auto_pdf = T, dpi = NULL)
+
+
+```
+
+***Disclaimer:***  Trade or company names used in this document are for informational purposes only. This use does not constitute an endorsement by USDA-NRCS or the contributing authors of this chapter.
+
+## References 
